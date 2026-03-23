@@ -17,6 +17,16 @@ tracing-subscriber = "0.3.22"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
-name = "secs2_bench"
-path = "benchmark/secs2_bench.rs"
+name = "secs2_benchmark"
 harness = false
+path = "benchmark/secs2_benchmark.rs"
+
+[[bench]]
+name = "hsms_benchmark"
+harness = false
+path = "benchmark/hsms_benchmark.rs"
+
+[[bench]]
+name = "gem_benchmark"
+harness = false
+path = "benchmark/gem_benchmark.rs"
