@@ -1,6 +1,5 @@
 use crate::gem::gem_state::StateMachineConfig;
 use crate::hsms::config::HsmsConfig;
-use std::time::Duration;
 
 /// GEM 角色：设备端 (Equipment) 或 主机端 (Host)
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -25,8 +24,6 @@ pub struct GemConfig {
     pub mdln: String,
     /// 软件版本 (SOFTREV)，用于 S1F2/S1F13/S1F14
     pub softrev: String,
-    /// S1F13 通信建立超时（默认 5s）
-    pub establish_comm_timeout: Duration,
 }
 
 impl Default for GemConfig {
@@ -37,7 +34,6 @@ impl Default for GemConfig {
             state_machine_config: StateMachineConfig::default(),
             mdln: "SECS-SIMULATOR".to_string(),
             softrev: "1.0.0".to_string(),
-            establish_comm_timeout: Duration::from_secs(5),
         }
     }
 }
@@ -51,14 +47,12 @@ impl GemConfig {
     /// - `state_machine_config`: GEM 状态机配置（可选，默认使用 `StateMachineConfig::default()`）
     /// - `mdln`: 设备型号名（可选，默认 "SECS-SIMULATOR"）
     /// - `softrev`: 软件版本（可选，默认 "1.0.0"）
-    /// - `establish_comm_timeout`: S1F13 通信建立超时（可选，默认 5s）
     pub fn new(
         role: GemRole,
         hsms_config: HsmsConfig,
         state_machine_config: Option<StateMachineConfig>,
         mdln: Option<String>,
         softrev: Option<String>,
-        establish_comm_timeout: Option<Duration>,
     ) -> Self {
         let defaults = Self::default();
         Self {
@@ -67,7 +61,6 @@ impl GemConfig {
             state_machine_config: state_machine_config.unwrap_or(defaults.state_machine_config),
             mdln: mdln.unwrap_or(defaults.mdln),
             softrev: softrev.unwrap_or(defaults.softrev),
-            establish_comm_timeout: establish_comm_timeout.unwrap_or(defaults.establish_comm_timeout),
         }
     }
 }
