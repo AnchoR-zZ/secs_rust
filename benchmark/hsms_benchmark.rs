@@ -27,6 +27,10 @@ const NETWORK_CONCURRENCY_LEVELS: [usize; 2] = [2, 4];
 
 static NEXT_LOOPBACK_PORT: AtomicU16 = AtomicU16::new(16_000);
 
+// Note: LoopbackFixture does not implement Drop because shutdown() is async.
+// Benchmark processes are short-lived; the OS reclaims ports on exit. If a bench
+// function panics mid-iteration, subsequent tests may see port conflicts, but this
+// is acceptable for benchmarks where panics indicate a real bug to fix.
 struct LoopbackFixture {
     active: HsmsCommunicator,
     passive: HsmsCommunicator,
@@ -44,6 +48,14 @@ fn build_runtime() -> Runtime {
         .enable_all()
         .build()
         .expect("tokio runtime should be available for HSMS network benchmarks")
+}
+
+fn build_multi_thread_runtime(workers: usize) -> Runtime {
+    Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .expect("tokio multi-thread runtime should be available for HSMS concurrent benchmarks")
 }
 
 fn next_loopback_port() -> u16 {
@@ -240,7 +252,7 @@ fn bench_loopback_connection_latency(c: &mut Criterion) {
     let runtime = build_runtime();
     let mut group = c.benchmark_group("hsms_loopback/connection_latency");
 
-    group.measurement_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(3));
     group.throughput(Throughput::Elements(1));
     group.bench_function("connect_and_select", |b| {
         b.iter_custom(|iters| {
@@ -263,7 +275,7 @@ fn bench_loopback_rtt(c: &mut Criterion) {
     let runtime = build_runtime();
     let mut group = c.benchmark_group("hsms_loopback/rtt");
 
-    group.measurement_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(3));
 
     for size in data_generator::HSMS_BODY_SIZES {
         let fixture = runtime.block_on(setup_loopback_pair(next_loopback_port()));
@@ -312,11 +324,11 @@ fn bench_loopback_rtt(c: &mut Criterion) {
 }
 
 fn bench_loopback_batch_throughput(c: &mut Criterion) {
-    // Batch tests measure sustained request/reply throughput over a single established loopback connection.
+    // Batch tests measure concurrent request/reply throughput over a single established loopback connection.
     let runtime = build_runtime();
     let mut group = c.benchmark_group("hsms_loopback/batch_throughput");
 
-    group.measurement_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(3));
 
     for size in data_generator::HSMS_BODY_SIZES {
         for batch_size in NETWORK_BATCH_SIZES {
@@ -326,17 +338,17 @@ fn bench_loopback_batch_throughput(c: &mut Criterion) {
             let label = format!("data_body_{size}b_batch_{batch_size}");
 
             group.throughput(Throughput::Bytes(bytes_per_batch));
-            group.bench_function(BenchmarkId::new("batch_round_trip_bytes", &label), |b| {
+            group.bench_function(BenchmarkId::new("batch_concurrent_bytes", &label), |b| {
                 b.iter_custom(|iters| {
                     let start = Instant::now();
                     runtime.block_on(async {
                         for _ in 0..iters {
-                            for _ in 0..batch_size {
-                                let reply = active
-                                    .send_message_with_reply(network_request(size))
-                                    .await
-                                    .expect("loopback batch request should succeed");
-                                black_box(reply);
+                            let futures: Vec<_> = (0..batch_size)
+                                .map(|_| active.send_message_with_reply(network_request(size)))
+                                .collect();
+                            let replies = join_all(futures).await;
+                            for reply in replies {
+                                black_box(reply.expect("loopback batch request should succeed"));
                             }
                         }
                     });
@@ -345,17 +357,17 @@ fn bench_loopback_batch_throughput(c: &mut Criterion) {
             });
 
             group.throughput(Throughput::Elements(batch_size));
-            group.bench_function(BenchmarkId::new("batch_round_trip_messages", &label), |b| {
+            group.bench_function(BenchmarkId::new("batch_concurrent_messages", &label), |b| {
                 b.iter_custom(|iters| {
                     let start = Instant::now();
                     runtime.block_on(async {
                         for _ in 0..iters {
-                            for _ in 0..batch_size {
-                                let reply = active
-                                    .send_message_with_reply(network_request(size))
-                                    .await
-                                    .expect("loopback batch request should succeed");
-                                black_box(reply);
+                            let futures: Vec<_> = (0..batch_size)
+                                .map(|_| active.send_message_with_reply(network_request(size)))
+                                .collect();
+                            let replies = join_all(futures).await;
+                            for reply in replies {
+                                black_box(reply.expect("loopback batch request should succeed"));
                             }
                         }
                     });
@@ -371,15 +383,16 @@ fn bench_loopback_batch_throughput(c: &mut Criterion) {
 }
 
 fn bench_loopback_concurrent_throughput(c: &mut Criterion) {
-    // Concurrent pairs provide a second-stage view of scheduler and socket contention across loopback sessions.
-    let runtime = build_runtime();
+    // Concurrent pairs measure scheduler and socket contention across loopback sessions on a
+    // multi-thread runtime so that pairs actually run in parallel across OS threads.
     let mut group = c.benchmark_group("hsms_loopback/concurrent_throughput");
     let body_size = 100;
     let bytes_per_round_trip = loopback_wire_bytes(body_size);
 
-    group.measurement_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(3));
 
     for concurrency in NETWORK_CONCURRENCY_LEVELS {
+        let runtime = build_multi_thread_runtime(concurrency);
         let fixtures: Vec<_> = runtime.block_on(async {
             let mut fixtures = Vec::with_capacity(concurrency);
             for _ in 0..concurrency {

@@ -6,6 +6,7 @@ use criterion::{
     black_box, criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion,
     Throughput,
 };
+use futures::future::join_all;
 use secs_rust::gem::communicator::GemCommunicator;
 use secs_rust::gem::config::{GemConfig, GemRole};
 use secs_rust::gem::gem_state::{
@@ -27,6 +28,8 @@ const GEM_LOOPBACK_BATCH_SIZES: [u64; 2] = [16, 64];
 
 static NEXT_GEM_LOOPBACK_PORT: AtomicU16 = AtomicU16::new(17_000);
 
+// Note: GemLoopbackFixture does not implement Drop because shutdown() is async.
+// Benchmark processes are short-lived; the OS reclaims ports on exit.
 struct GemLoopbackFixture {
     equipment: GemCommunicator,
     host: GemCommunicator,
@@ -321,7 +324,7 @@ fn bench_gem_loopback_connection(c: &mut Criterion) {
     let runtime = build_runtime();
     let mut group = c.benchmark_group("gem_loopback/connection_latency");
 
-    group.measurement_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(3));
     group.throughput(Throughput::Elements(1));
     group.bench_function("connect_and_select", |b| {
         b.iter_custom(|iters| {
@@ -344,7 +347,7 @@ fn bench_gem_loopback_online_transition(c: &mut Criterion) {
     let runtime = build_runtime();
     let mut group = c.benchmark_group("gem_loopback/operator_online_latency");
 
-    group.measurement_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(3));
     group.throughput(Throughput::Elements(1));
     group.bench_function("equipment_operator_online", |b| {
         b.iter_custom(|iters| {
@@ -376,10 +379,16 @@ fn bench_gem_loopback_control_rtt(c: &mut Criterion) {
     let runtime = build_runtime();
     let mut group = c.benchmark_group("gem_loopback/control_rtt");
 
-    group.measurement_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(3));
 
     let offline_bytes = gem_control_wire_bytes(gem_message::build_s1f15, gem_message::build_s1f16_reply);
     let online_bytes = gem_control_wire_bytes(gem_message::build_s1f17, gem_message::build_s1f18_reply);
+
+    // Each offline iteration sends S1F15 (go offline) then S1F17 (recover online) — a full cycle.
+    // Each online iteration calls operator_online, then S1F15 (go offline), then S1F17 (go online).
+    // Throughput reflects the total wire bytes of the full cycle per iteration.
+    let offline_cycle_bytes = offline_bytes + online_bytes;
+    let online_cycle_bytes = offline_bytes + online_bytes;
 
     let offline_fixture = runtime.block_on(async {
         let fixture = setup_gem_loopback_pair(next_gem_loopback_port()).await;
@@ -387,8 +396,8 @@ fn bench_gem_loopback_control_rtt(c: &mut Criterion) {
         fixture
     });
 
-    group.throughput(Throughput::Bytes(offline_bytes));
-    group.bench_function("host_s1f15_s1f16_bytes", |b| {
+    group.throughput(Throughput::Bytes(offline_cycle_bytes));
+    group.bench_function("host_offline_recover_cycle_bytes", |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             runtime.block_on(async {
@@ -412,7 +421,7 @@ fn bench_gem_loopback_control_rtt(c: &mut Criterion) {
     });
 
     group.throughput(Throughput::Elements(1));
-    group.bench_function("host_s1f15_s1f16_messages", |b| {
+    group.bench_function("host_offline_recover_cycle_messages", |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             runtime.block_on(async {
@@ -442,8 +451,8 @@ fn bench_gem_loopback_control_rtt(c: &mut Criterion) {
         fixture
     });
 
-    group.throughput(Throughput::Bytes(online_bytes));
-    group.bench_function("host_s1f17_s1f18_bytes", |b| {
+    group.throughput(Throughput::Bytes(online_cycle_bytes));
+    group.bench_function("host_online_recover_cycle_bytes", |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             runtime.block_on(async {
@@ -474,7 +483,7 @@ fn bench_gem_loopback_control_rtt(c: &mut Criterion) {
     });
 
     group.throughput(Throughput::Elements(1));
-    group.bench_function("host_s1f17_s1f18_messages", |b| {
+    group.bench_function("host_online_recover_cycle_messages", |b| {
         b.iter_custom(|iters| {
             let start = Instant::now();
             runtime.block_on(async {
@@ -514,7 +523,7 @@ fn bench_gem_loopback_passthrough(c: &mut Criterion) {
     let runtime = build_runtime();
     let mut group = c.benchmark_group("gem_loopback/passthrough_rtt");
 
-    group.measurement_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(3));
 
     for size in data_generator::HSMS_BODY_SIZES {
         let fixture = runtime.block_on(async {
@@ -568,11 +577,11 @@ fn bench_gem_loopback_passthrough(c: &mut Criterion) {
 }
 
 fn bench_gem_loopback_batch_throughput(c: &mut Criterion) {
-    // Batch throughput measures sustained non-GEM traffic while GEM remains online and stable.
+    // Batch throughput measures concurrent non-GEM traffic while GEM remains online and stable.
     let runtime = build_runtime();
     let mut group = c.benchmark_group("gem_loopback/batch_throughput");
 
-    group.measurement_time(Duration::from_secs(2));
+    group.measurement_time(Duration::from_secs(3));
 
     for size in data_generator::HSMS_BODY_SIZES {
         for batch_size in GEM_LOOPBACK_BATCH_SIZES {
@@ -585,18 +594,17 @@ fn bench_gem_loopback_batch_throughput(c: &mut Criterion) {
             let label = format!("data_body_{size}b_batch_{batch_size}");
 
             group.throughput(Throughput::Bytes(bytes_per_batch));
-            group.bench_function(BenchmarkId::new("batch_round_trip_bytes", &label), |b| {
+            group.bench_function(BenchmarkId::new("batch_concurrent_bytes", &label), |b| {
                 b.iter_custom(|iters| {
                     let start = Instant::now();
                     runtime.block_on(async {
                         for _ in 0..iters {
-                            for _ in 0..batch_size {
-                                let reply = fixture
-                                    .host
-                                    .send_message_with_reply(gem_passthrough_request(size))
-                                    .await
-                                    .expect("GEM batch passthrough request should succeed");
-                                black_box(reply);
+                            let futures: Vec<_> = (0..batch_size)
+                                .map(|_| fixture.host.send_message_with_reply(gem_passthrough_request(size)))
+                                .collect();
+                            let replies = join_all(futures).await;
+                            for reply in replies {
+                                black_box(reply.expect("GEM batch passthrough request should succeed"));
                             }
                         }
                     });
@@ -605,18 +613,17 @@ fn bench_gem_loopback_batch_throughput(c: &mut Criterion) {
             });
 
             group.throughput(Throughput::Elements(batch_size));
-            group.bench_function(BenchmarkId::new("batch_round_trip_messages", &label), |b| {
+            group.bench_function(BenchmarkId::new("batch_concurrent_messages", &label), |b| {
                 b.iter_custom(|iters| {
                     let start = Instant::now();
                     runtime.block_on(async {
                         for _ in 0..iters {
-                            for _ in 0..batch_size {
-                                let reply = fixture
-                                    .host
-                                    .send_message_with_reply(gem_passthrough_request(size))
-                                    .await
-                                    .expect("GEM batch passthrough request should succeed");
-                                black_box(reply);
+                            let futures: Vec<_> = (0..batch_size)
+                                .map(|_| fixture.host.send_message_with_reply(gem_passthrough_request(size)))
+                                .collect();
+                            let replies = join_all(futures).await;
+                            for reply in replies {
+                                black_box(reply.expect("GEM batch passthrough request should succeed"));
                             }
                         }
                     });

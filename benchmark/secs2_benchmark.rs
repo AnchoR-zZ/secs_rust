@@ -11,7 +11,7 @@ use std::time::Duration;
 
 fn criterion_config() -> Criterion {
     Criterion::default()
-        .sample_size(10)
+        .sample_size(50)
         .warm_up_time(Duration::from_millis(200))
         .measurement_time(Duration::from_secs(1))
 }

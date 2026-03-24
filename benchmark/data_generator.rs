@@ -14,8 +14,8 @@ pub const HSMS_BODY_SIZES: [usize; 3] = [10, 100, 1_000];
 
 pub type Secs2Factory = fn(usize) -> Secs2;
 
-pub fn secs2_scalar_factories() -> [(&'static str, Secs2Factory); 13] {
-    [
+pub fn secs2_scalar_factories() -> Vec<(&'static str, Secs2Factory)> {
+    vec![
         ("ascii", ascii),
         ("binary", binary),
         ("boolean", boolean),
@@ -213,13 +213,17 @@ pub fn hsms_data_message(body_size: usize) -> HsmsMessage {
 
 pub fn hsms_control_messages() -> Vec<(&'static str, HsmsMessage)> {
     let select_req = HsmsMessage::select_req(0x1001, 0x1000_0001);
+    let deselect_req = HsmsMessage::deselect_req(0x1001, 0x1000_0003);
     let linktest_req = HsmsMessage::linktest_req(0x1000_0002);
 
     vec![
         ("select_req", select_req.clone()),
         ("select_rsp", HsmsMessage::select_rsp(&select_req, 0)),
+        ("deselect_req", deselect_req.clone()),
+        ("deselect_rsp", HsmsMessage::deselect_rsp(&deselect_req, 0)),
         ("linktest_req", linktest_req.clone()),
         ("linktest_rsp", HsmsMessage::linktest_rsp(&linktest_req)),
+        ("separate_req", HsmsMessage::separate_req(0x1001, 0x1000_0004)),
     ]
 }
 
