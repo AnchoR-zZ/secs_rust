@@ -230,7 +230,7 @@ async fn test_gem_full_state_lifecycle() {
 
     // ── 阶段 4: 主机请求离线 (S1F15/S1F16) ────────────────────────
     // 转换 #10: OnLine → HostOffline
-    let s1f15 = secs_rust::gem::message::build_s1f15(0);
+    let s1f15 = secs_rust::gem::message::build_s1f15();
     let s1f16 = host_comm
         .send_message_with_reply(s1f15)
         .await
@@ -266,7 +266,7 @@ async fn test_gem_full_state_lifecycle() {
 
     // ── 阶段 5: 主机请求上线 (S1F17/S1F18) ────────────────────────
     // 转换 #11: HostOffline → OnLine/Local
-    let s1f17 = secs_rust::gem::message::build_s1f17(0);
+    let s1f17 = secs_rust::gem::message::build_s1f17();
     let s1f18 = host_comm
         .send_message_with_reply(s1f17)
         .await
@@ -323,7 +323,7 @@ async fn test_gem_full_state_lifecycle() {
     .await;
 
     // 转换 #10: 主机再次请求离线
-    let s1f15_2 = secs_rust::gem::message::build_s1f15(0);
+    let s1f15_2 = secs_rust::gem::message::build_s1f15();
     let _ = host_comm
         .send_message_with_reply(s1f15_2)
         .await

@@ -1,4 +1,4 @@
-#[path = "data_generator.rs"]
+﻿#[path = "data_generator.rs"]
 mod data_generator;
 
 use criterion::measurement::WallTime;
@@ -104,8 +104,8 @@ fn gem_message_wire_bytes(body_size: usize) -> u64 {
     (encode_wire_len(&request) + encode_wire_len(&reply)) as u64
 }
 
-fn gem_control_wire_bytes(build_request: fn(u16) -> HsmsMessage, build_reply: fn(&HsmsMessage, u8) -> HsmsMessage) -> u64 {
-    let request = build_request(0);
+fn gem_control_wire_bytes(build_request: fn() -> HsmsMessage, build_reply: fn(&HsmsMessage, u8) -> HsmsMessage) -> u64 {
+    let request = build_request();
     let reply = build_reply(&request, 0);
     (encode_wire_len(&request) + encode_wire_len(&reply)) as u64
 }
@@ -241,27 +241,27 @@ fn bench_message_builders(c: &mut Criterion) {
     // Builder benchmarks isolate message construction cost from later codec and transport overhead.
     let mut group = c.benchmark_group("gem/message_builders");
 
-    bench_builder(&mut group, "build_s1f1", || gem_message::build_s1f1(0x1001));
-    bench_builder(&mut group, "build_s1f15", || gem_message::build_s1f15(0x1001));
-    bench_builder(&mut group, "build_s1f17", || gem_message::build_s1f17(0x1001));
+    bench_builder(&mut group, "build_s1f1", || gem_message::build_s1f1());
+    bench_builder(&mut group, "build_s1f15", || gem_message::build_s1f15());
+    bench_builder(&mut group, "build_s1f17", || gem_message::build_s1f17());
 
     for (label, mdln, softrev) in data_generator::gem_identity_variants() {
-        let s1f1_req = gem_message::build_s1f1(0x1001);
-        let s1f13_req = gem_message::build_s1f13(0x1001, mdln, softrev);
+        let s1f1_req = gem_message::build_s1f1();
+        let s1f13_req = gem_message::build_s1f13(mdln, softrev);
 
         bench_builder(&mut group, &format!("build_s1f2_reply/{label}"), || {
             gem_message::build_s1f2_reply(&s1f1_req, mdln, softrev)
         });
         bench_builder(&mut group, &format!("build_s1f13/{label}"), || {
-            gem_message::build_s1f13(0x1001, mdln, softrev)
+            gem_message::build_s1f13(mdln, softrev)
         });
         bench_builder(&mut group, &format!("build_s1f14_reply/{label}"), || {
             gem_message::build_s1f14_reply(&s1f13_req, 0, mdln, softrev)
         });
     }
 
-    let s1f15_req = gem_message::build_s1f15(0x1001);
-    let s1f17_req = gem_message::build_s1f17(0x1001);
+    let s1f15_req = gem_message::build_s1f15();
+    let s1f17_req = gem_message::build_s1f17();
 
     bench_builder(&mut group, "build_s1f16_reply/accepted", || {
         gem_message::build_s1f16_reply(&s1f15_req, 0)
@@ -384,7 +384,7 @@ fn bench_gem_loopback_control_rtt(c: &mut Criterion) {
     let offline_bytes = gem_control_wire_bytes(gem_message::build_s1f15, gem_message::build_s1f16_reply);
     let online_bytes = gem_control_wire_bytes(gem_message::build_s1f17, gem_message::build_s1f18_reply);
 
-    // Each offline iteration sends S1F15 (go offline) then S1F17 (recover online) — a full cycle.
+    // Each offline iteration sends S1F15 (go offline) then S1F17 (recover online) 鈥?a full cycle.
     // Each online iteration calls operator_online, then S1F15 (go offline), then S1F17 (go online).
     // Throughput reflects the total wire bytes of the full cycle per iteration.
     let offline_cycle_bytes = offline_bytes + online_bytes;
@@ -404,14 +404,14 @@ fn bench_gem_loopback_control_rtt(c: &mut Criterion) {
                 for _ in 0..iters {
                     let reply = offline_fixture
                         .host
-                        .send_message_with_reply(gem_message::build_s1f15(0))
+                        .send_message_with_reply(gem_message::build_s1f15())
                         .await
                         .expect("S1F15/S1F16 round trip should succeed");
                     black_box(reply);
 
                     offline_fixture
                         .host
-                        .send_message_with_reply(gem_message::build_s1f17(0))
+                        .send_message_with_reply(gem_message::build_s1f17())
                         .await
                         .expect("S1F17/S1F18 recovery should succeed");
                 }
@@ -428,14 +428,14 @@ fn bench_gem_loopback_control_rtt(c: &mut Criterion) {
                 for _ in 0..iters {
                     let reply = offline_fixture
                         .host
-                        .send_message_with_reply(gem_message::build_s1f15(0))
+                        .send_message_with_reply(gem_message::build_s1f15())
                         .await
                         .expect("S1F15/S1F16 round trip should succeed");
                     black_box(reply);
 
                     offline_fixture
                         .host
-                        .send_message_with_reply(gem_message::build_s1f17(0))
+                        .send_message_with_reply(gem_message::build_s1f17())
                         .await
                         .expect("S1F17/S1F18 recovery should succeed");
                 }
@@ -465,14 +465,14 @@ fn bench_gem_loopback_control_rtt(c: &mut Criterion) {
 
                     let reply = online_fixture
                         .host
-                        .send_message_with_reply(gem_message::build_s1f15(0))
+                        .send_message_with_reply(gem_message::build_s1f15())
                         .await
                         .expect("S1F15/S1F16 pre-step should succeed");
                     black_box(reply);
 
                     let reply = online_fixture
                         .host
-                        .send_message_with_reply(gem_message::build_s1f17(0))
+                        .send_message_with_reply(gem_message::build_s1f17())
                         .await
                         .expect("S1F17/S1F18 round trip should succeed");
                     black_box(reply);
@@ -496,14 +496,14 @@ fn bench_gem_loopback_control_rtt(c: &mut Criterion) {
 
                     let reply = online_fixture
                         .host
-                        .send_message_with_reply(gem_message::build_s1f15(0))
+                        .send_message_with_reply(gem_message::build_s1f15())
                         .await
                         .expect("S1F15/S1F16 pre-step should succeed");
                     black_box(reply);
 
                     let reply = online_fixture
                         .host
-                        .send_message_with_reply(gem_message::build_s1f17(0))
+                        .send_message_with_reply(gem_message::build_s1f17())
                         .await
                         .expect("S1F17/S1F18 round trip should succeed");
                     black_box(reply);

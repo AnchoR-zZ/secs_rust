@@ -178,11 +178,7 @@ impl GemSession {
 
     /// Equipment 模式：主动发起 S1F13 通信建立
     pub async fn initiate_communication(&mut self) -> bool {
-        let session_id = *self.communicator.state_rx().borrow();
-        let _ = session_id; // 使用 hsms_config 中的 session_id
-        
         let s1f13 = message::build_s1f13(
-            0, // session_id 会在 HSMS 层自动处理
             &self.mdln,
             &self.softrev,
         );
@@ -213,7 +209,7 @@ impl GemSession {
 
     /// Equipment 模式：在 AttemptOnLine 状态发送 S1F1 并等待 S1F2
     pub async fn attempt_online(&mut self) -> bool {
-        let s1f1 = message::build_s1f1(0);
+        let s1f1 = message::build_s1f1();
 
         tracing::info!("GEM: Sending S1F1 Are You There (AttemptOnLine)");
 

@@ -229,6 +229,12 @@ impl HsmsSession {
         true
     }
 
+    /// 为出站 Data Message 自动填充当前 session 的 session_id。
+    /// 上层构造消息时无需关心 session_id，由 HSMS Session 统一处理。
+    fn stamp_session_id(&self, msg: &mut HsmsMessage) {
+        msg.header.session_id = self.session_id;
+    }
+
     /// 处理应用层要发送的消息
     /// 返回 true 表示需要 shutdown，false 表示继续运行
     async fn handle_outbound_msg(&mut self, cmd: HsmsCommand) -> bool {
@@ -245,23 +251,26 @@ impl HsmsSession {
                 self.handle_separate_command(reply_tx).await;
                 false
             }
-            HsmsCommand::SendReply { msg } => {
+            HsmsCommand::SendReply { mut msg } => {
+                self.stamp_session_id(&mut msg);
                 if let Err(e) = self.stream.send(msg).await {
                     tracing::error!("Failed to send reply: {}", e);
                 }
                 false
             }
-            HsmsCommand::SendMessage { msg } => {
+            HsmsCommand::SendMessage { mut msg } => {
+                self.stamp_session_id(&mut msg);
                 if let Err(e) = self.stream.send(msg).await {
-                    tracing::error!("Failed to send reply: {}", e);
+                    tracing::error!("Failed to send message: {}", e);
                 }
                 false
             }
-            HsmsCommand::SendMessageNeedReply { msg, reply_tx } => {
+            HsmsCommand::SendMessageNeedReply { mut msg, reply_tx } => {
+                self.stamp_session_id(&mut msg);
                 tracing::debug!("Sending message with reply: {:?}", msg);
                 let sys_id = msg.header.system_bytes;
                 if let Err(e) = self.stream.send(msg).await {
-                    tracing::error!("Failed to send reply: {}", e);
+                    tracing::error!("Failed to send message: {}", e);
                 }
                 self.t3_replies.insert(
                     sys_id,

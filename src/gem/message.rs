@@ -11,9 +11,9 @@ use crate::util::next_system_bytes;
 // ============================================================================
 
 /// 构造 S1F0 Abort Transaction
-pub fn build_s1f0(session_id: u16) -> HsmsMessage {
+pub fn build_s1f0() -> HsmsMessage {
     HsmsMessage::build_unidirectional_data_message(
-        session_id, 1, 0,
+        0, 1, 0,
         next_system_bytes(),
         Secs2::EMPTY,
     )
@@ -24,9 +24,9 @@ pub fn build_s1f0(session_id: u16) -> HsmsMessage {
 // ============================================================================
 
 /// 构造 S1F1 Are You There Request (W-bit = true)
-pub fn build_s1f1(session_id: u16) -> HsmsMessage {
+pub fn build_s1f1() -> HsmsMessage {
     HsmsMessage::build_request_data_message(
-        session_id, 1, 1,
+        0, 1, 1,
         next_system_bytes(),
         Secs2::EMPTY,
     )
@@ -53,7 +53,7 @@ pub fn build_s1f2_reply(req: &HsmsMessage, mdln: &str, softrev: &str) -> HsmsMes
 
 /// 构造 S1F13 Establish Communication Request (W-bit = true)
 /// body = L:2 { A:mdln, A:softrev } 或 L:0
-pub fn build_s1f13(session_id: u16, mdln: &str, softrev: &str) -> HsmsMessage {
+pub fn build_s1f13(mdln: &str, softrev: &str) -> HsmsMessage {
     let body = if mdln.is_empty() && softrev.is_empty() {
         Secs2::LIST(vec![])
     } else {
@@ -63,7 +63,7 @@ pub fn build_s1f13(session_id: u16, mdln: &str, softrev: &str) -> HsmsMessage {
         ])
     };
     HsmsMessage::build_request_data_message(
-        session_id, 1, 13,
+        0, 1, 13,
         next_system_bytes(),
         body,
     )
@@ -92,9 +92,9 @@ pub fn build_s1f14_reply(req: &HsmsMessage, commack: u8, mdln: &str, softrev: &s
 // ============================================================================
 
 /// 构造 S1F15 Request OFF-LINE (W-bit = true)
-pub fn build_s1f15(session_id: u16) -> HsmsMessage {
+pub fn build_s1f15() -> HsmsMessage {
     HsmsMessage::build_request_data_message(
-        session_id, 1, 15,
+        0, 1, 15,
         next_system_bytes(),
         Secs2::EMPTY,
     )
@@ -111,9 +111,9 @@ pub fn build_s1f16_reply(req: &HsmsMessage, oflack: u8) -> HsmsMessage {
 // ============================================================================
 
 /// 构造 S1F17 Request ON-LINE (W-bit = true)
-pub fn build_s1f17(session_id: u16) -> HsmsMessage {
+pub fn build_s1f17() -> HsmsMessage {
     HsmsMessage::build_request_data_message(
-        session_id, 1, 17,
+        0, 1, 17,
         next_system_bytes(),
         Secs2::EMPTY,
     )
@@ -135,17 +135,16 @@ mod tests {
 
     #[test]
     fn test_build_s1f1() {
-        let msg = build_s1f1(100);
+        let msg = build_s1f1();
         assert_eq!(msg.header.stream, 1);
         assert_eq!(msg.header.function, 1);
-        assert_eq!(msg.header.session_id, 100);
         assert!(msg.header.w_bit);
         assert_eq!(msg.body, Secs2::EMPTY);
     }
 
     #[test]
     fn test_build_s1f2_reply_with_data() {
-        let req = build_s1f1(100);
+        let req = build_s1f1();
         let reply = build_s1f2_reply(&req, "MODEL", "1.0.0");
         assert_eq!(reply.header.stream, 1);
         assert_eq!(reply.header.function, 2);
@@ -163,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_build_s1f2_reply_empty() {
-        let req = build_s1f1(100);
+        let req = build_s1f1();
         let reply = build_s1f2_reply(&req, "", "");
         assert_eq!(reply.header.function, 2);
         match &reply.body {
@@ -174,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_build_s1f13() {
-        let msg = build_s1f13(200, "EQ1", "2.0");
+        let msg = build_s1f13("EQ1", "2.0");
         assert_eq!(msg.header.stream, 1);
         assert_eq!(msg.header.function, 13);
         assert!(msg.header.w_bit);
@@ -190,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_build_s1f14_reply() {
-        let req = build_s1f13(200, "", "");
+        let req = build_s1f13("", "");
         let reply = build_s1f14_reply(&req, 0, "HOST", "3.0");
         assert_eq!(reply.header.stream, 1);
         assert_eq!(reply.header.function, 14);
@@ -213,7 +212,7 @@ mod tests {
 
     #[test]
     fn test_build_s1f15() {
-        let msg = build_s1f15(300);
+        let msg = build_s1f15();
         assert_eq!(msg.header.stream, 1);
         assert_eq!(msg.header.function, 15);
         assert!(msg.header.w_bit);
@@ -221,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_build_s1f16_reply() {
-        let req = build_s1f15(300);
+        let req = build_s1f15();
         let reply = build_s1f16_reply(&req, 0);
         assert_eq!(reply.header.function, 16);
         assert_eq!(reply.body, Secs2::BINARY(vec![0]));
@@ -229,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_build_s1f17() {
-        let msg = build_s1f17(400);
+        let msg = build_s1f17();
         assert_eq!(msg.header.stream, 1);
         assert_eq!(msg.header.function, 17);
         assert!(msg.header.w_bit);
@@ -237,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_build_s1f18_reply() {
-        let req = build_s1f17(400);
+        let req = build_s1f17();
         let reply = build_s1f18_reply(&req, 0);
         assert_eq!(reply.header.function, 18);
         assert_eq!(reply.body, Secs2::BINARY(vec![0]));
@@ -245,7 +244,7 @@ mod tests {
 
     #[test]
     fn test_build_s1f0() {
-        let msg = build_s1f0(500);
+        let msg = build_s1f0();
         assert_eq!(msg.header.stream, 1);
         assert_eq!(msg.header.function, 0);
         assert!(!msg.header.w_bit);
