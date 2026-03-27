@@ -382,7 +382,7 @@ fn bench_loopback_batch_throughput(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_loopback_concurrent_throughput(c: &mut Criterion) {
+fn bench_loopback_multi_pair_throughput(c: &mut Criterion) {
     // Concurrent pairs measure scheduler and socket contention across loopback sessions on a
     // multi-thread runtime so that pairs actually run in parallel across OS threads.
     let mut group = c.benchmark_group("hsms_loopback/concurrent_throughput");
@@ -465,6 +465,6 @@ criterion_group! {
         bench_loopback_connection_latency,
         bench_loopback_rtt,
         bench_loopback_batch_throughput,
-        bench_loopback_concurrent_throughput
+        bench_loopback_multi_pair_throughput
 }
 criterion_main!(benches);
