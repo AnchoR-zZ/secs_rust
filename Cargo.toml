@@ -2,6 +2,7 @@
 name = "secs_rust"
 version = "0.1.0"
 edition = "2021"
+license = "MIT" 
 
 [dependencies]
 tokio = { version = "1.48.0", features = ["sync", "net", "rt", "time", "macros"] }
