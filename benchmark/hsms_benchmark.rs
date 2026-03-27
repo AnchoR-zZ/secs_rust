@@ -7,6 +7,7 @@ use criterion::{
     Throughput,
 };
 use futures::future::join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use secs_rust::hsms::{
     communicator::HsmsCommunicator,
     config::{ConnectionMode, HsmsConfig},
@@ -24,6 +25,9 @@ use tokio_util::codec::{Decoder, Encoder};
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
 const NETWORK_BATCH_SIZES: [u64; 2] = [32, 128];
 const NETWORK_CONCURRENCY_LEVELS: [usize; 2] = [2, 4];
+
+const PIPELINE_CONCURRENCY_LEVELS: [usize; 3] = [4, 16, 32];
+const PIPELINE_TOTAL_MESSAGES: u64 = 1024;
 
 static NEXT_LOOPBACK_PORT: AtomicU16 = AtomicU16::new(16_000);
 
@@ -382,6 +386,103 @@ fn bench_loopback_batch_throughput(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_loopback_pipelined_throughput(c: &mut Criterion) {
+    // Pipelined tests measure sustained throughput with a fixed concurrency window on a single
+    // connection. Unlike batch tests (burst-then-wait), new requests are issued immediately as
+    // replies arrive, keeping N requests in-flight at all times.
+    let runtime = build_runtime();
+    let mut group = c.benchmark_group("hsms_loopback/pipelined_throughput");
+
+    group.measurement_time(Duration::from_secs(3));
+
+    for size in data_generator::HSMS_BODY_SIZES {
+        for concurrency in PIPELINE_CONCURRENCY_LEVELS {
+            let fixture = runtime.block_on(setup_loopback_pair(next_loopback_port()));
+            let active = fixture.active.clone();
+            let total_messages = PIPELINE_TOTAL_MESSAGES;
+            let bytes_per_message = loopback_wire_bytes(size);
+            let bytes_total = bytes_per_message * total_messages;
+            let label = format!("data_body_{size}b_pipe_{concurrency}");
+
+            group.throughput(Throughput::Bytes(bytes_total));
+            group.bench_function(BenchmarkId::new("pipelined_bytes", &label), |b| {
+                b.iter_custom(|iters| {
+                    let start = Instant::now();
+                    runtime.block_on(async {
+                        for _ in 0..iters {
+                            let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
+
+                            // Pre-fill the concurrency window
+                            for _ in 0..concurrency {
+                                in_flight.push(active.send_message_with_reply(network_request(size)));
+                            }
+
+                            // Sustain the window: each completion triggers a new request
+                            let mut sent = concurrency as u64;
+                            while sent < total_messages {
+                                let reply = in_flight
+                                    .next()
+                                    .await
+                                    .expect("pipelined request should succeed")
+                                    .expect("pipelined request should succeed");
+                                black_box(reply);
+                                in_flight.push(active.send_message_with_reply(network_request(size)));
+                                sent += 1;
+                            }
+
+                            // Drain remaining in-flight requests
+                            while let Some(reply) = in_flight.next().await {
+                                black_box(reply.expect("pipelined drain should succeed"));
+                            }
+                        }
+                    });
+                    start.elapsed()
+                })
+            });
+
+            group.throughput(Throughput::Elements(total_messages));
+            group.bench_function(BenchmarkId::new("pipelined_messages", &label), |b| {
+                b.iter_custom(|iters| {
+                    let start = Instant::now();
+                    runtime.block_on(async {
+                        for _ in 0..iters {
+                            let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
+
+                            // Pre-fill the concurrency window
+                            for _ in 0..concurrency {
+                                in_flight.push(active.send_message_with_reply(network_request(size)));
+                            }
+
+                            // Sustain the window: each completion triggers a new request
+                            let mut sent = concurrency as u64;
+                            while sent < total_messages {
+                                let reply = in_flight
+                                    .next()
+                                    .await
+                                    .expect("pipelined request should succeed")
+                                    .expect("pipelined request should succeed");
+                                black_box(reply);
+                                in_flight.push(active.send_message_with_reply(network_request(size)));
+                                sent += 1;
+                            }
+
+                            // Drain remaining in-flight requests
+                            while let Some(reply) = in_flight.next().await {
+                                black_box(reply.expect("pipelined drain should succeed"));
+                            }
+                        }
+                    });
+                    start.elapsed()
+                })
+            });
+
+            runtime.block_on(shutdown_loopback_pair(fixture));
+        }
+    }
+
+    group.finish();
+}
+
 fn bench_loopback_multi_pair_throughput(c: &mut Criterion) {
     // Concurrent pairs measure scheduler and socket contention across loopback sessions on a
     // multi-thread runtime so that pairs actually run in parallel across OS threads.
@@ -465,6 +566,7 @@ criterion_group! {
         bench_loopback_connection_latency,
         bench_loopback_rtt,
         bench_loopback_batch_throughput,
+        bench_loopback_pipelined_throughput,
         bench_loopback_multi_pair_throughput
 }
 criterion_main!(benches);
