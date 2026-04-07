@@ -1,46 +1,93 @@
 /*
- * CONTROL STATE MACHINE DIAGRAM
+ * COMMUNICATIONS STATE MACHINE DIAGRAM
  *
- * (Start)
- * | 1
- * v
- * (C)
- * |
- * +--------|--------------------------------------------------+
- * | OFF-LINE                                                  |
- * |                    (Start)                                |
- * |                       | 2                                 |
- * |                       v                                   |
- * |                      (C)                                  |
- * |                       |                                   |
- * |   +-----------+   3   v   +-----------+                   |
- * |   | Equipment |---------->|  Attempt  |                   |
- * |   | OFF-LINE  |           |  ON-LINE  |                   |
- * |   +-----------+           +-----------+                   |
- * |     ^   ^   ^               |                             |
- * |     |   |   |               | 4                           |
- * |     |   |   +-----------(C)<+                             |
- * |     |   | 12             |                                |
- * |     |   |         +------v------+                         |
- * |   6 |   +---------|    Host     |                         |
- * |     |             |  OFF-LINE   |                         |
- * |     |             +-------------+                         |
- * |     |                | 10    ^ 11                         | 5
- * +-----|----------------|-------|----------------------------+
- * |     |                |       |                            |
- * +-----|----------------|-------|----------------------------+
- * | ON-LINE              v       |                            v
- * |     (Start)                                               |
- * |        | 7                                                |
- * |        v                                                  |
- * |       (C)                                                 |
- * |        |                                                  |
- * |        v          8                                       |
- * |    +-------+ -----------> +--------+                      |
- * |    | LOCAL |              | REMOTE |                      |
- * |    +-------+ <----------- +--------+                      |
- * |                   9                                       |
- * +-----------------------------------------------------------+
+stateDiagram-v2
+    [*] --> DISABLED: 1 (Power-up)
+    [*] --> ENABLED: 1 (Power-up)
+
+    state ENABLED {
+        [*] --> NOT_COMMUNICATING: 4
+        
+        state NOT_COMMUNICATING {
+            direction LR
+            
+            state "EQUIPMENT-INITIATED CONNECT" as EQ_INIT {
+                [*] --> WAIT_CRA: 5
+                WAIT_CRA --> WAIT_DELAY: 6
+                WAIT_DELAY --> WAIT_CRA: 7, 8
+            }
+            
+            state "HOST-INITIATED CONNECT" as HOST_INIT {
+                [*] --> WAIT_CR_FROM_HOST: 10
+            }
+        }
+
+        NOT_COMMUNICATING --> COMMUNICATING: 9, 15
+        COMMUNICATING --> NOT_COMMUNICATING: 14
+    }
+
+    DISABLED --> ENABLED: 2
+    ENABLED --> DISABLED: 3
+ *
+ * COMMUNICATIONS STATE TRANSITION TABLE (Strictly aligned with SEMI E30 Table 3.2)
+ *
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | #  | Current State             | Trigger                                    | New State             | Action                                           | Comments                                         |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 1  | (Entry)                   | System initialization.                     | System Default        | None                                             | Default may be set to DISABLED or ENABLED.       |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 2  | DISABLED                  | Operator switches to ENABLED.              | ENABLED               | None                                             | SECS-II communications are enabled.              |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 3  | ENABLED                   | Operator switches to DISABLED.             | DISABLED              | None                                             | SECS-II communications are prohibited.           |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 4  | (Entry to ENABLED)        | Any entry to ENABLED state.                | NOT COMMUNICATING     | Init internal variables.                         | From init or operator switch.                    |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 5  | (Entry to EQ-INITIATED)   | Any entry to NOT COMMUNICATING.            | WAIT CRA              | Send S1,F13. Set CommDelay "expired".            | Begin establish communications attempt.          |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 6  | WAIT CRA                  | Connection transaction failure (T3 timeout | WAIT DELAY            | Init CommDelay timer. Dequeue all messages.      | Dequeued messages may be placed in spool buffer. |
+ * |    |                           | or S1,F14 with COMMACK != 0).              |                       |                                                  |                                                  |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 7  | WAIT DELAY                | CommDelay timer expired.                   | WAIT CRA              | Send S1,F13.                                     | Retry sending establish request.                 |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 8  | WAIT DELAY                | Received any message from host.            | WAIT CRA              | Discard message. No reply. Set timer "expired".  | Send S1,F13 immediately.                         |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 9  | WAIT CRA                  | Received expected S1,F14 (COMMACK = 0).    | COMMUNICATING         | None                                             | Communications are established.                  |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 10 | (Entry to HOST-INITIATED) | Any entry to NOT COMMUNICATING.            | WAIT CR FROM HOST     | None                                             | Wait for S1,F13 from Host.                       |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 14 | COMMUNICATING             | Communication failure.                     | NOT COMMUNICATING     | Dequeue all messages. Clear all internal timers. | Timers include T3, T5, T6, T7, T8.               |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ * | 15 | WAIT CR FROM HOST         | Received S1,F13.                           | COMMUNICATING         | Send S1,F14 (COMMACK = 0).                       | Communications are established.                  |
+ * +----+---------------------------+--------------------------------------------+-----------------------+--------------------------------------------------+--------------------------------------------------+
+ */
+
+/*
+ * CONTROL STATE MACHINE DIAGRAM
+stateDiagram-v2
+    [*] --> CONTROL: 1
+    
+    state CONTROL {
+        [*] --> OFF_LINE: 2
+        
+        state OFF_LINE {
+            [*] --> EQUIPMENT_OFF_LINE
+            EQUIPMENT_OFF_LINE --> ATTEMPT_ON_LINE : 3
+            ATTEMPT_ON_LINE --> EQUIPMENT_OFF_LINE : 4
+            ATTEMPT_ON_LINE --> HOST_OFF_LINE : 4
+            HOST_OFF_LINE --> EQUIPMENT_OFF_LINE : 12
+        }
+
+        state ON_LINE {
+            [*] --> LOCAL: 7
+            [*] --> REMOTE: 7
+            
+            LOCAL --> REMOTE : 8
+            REMOTE --> LOCAL : 9
+        }
+
+        OFF_LINE --> ON_LINE : 5/11
+        ON_LINE --> OFF_LINE : 6/10
+    }
  *
  * CONTROL STATE TRANSITION TABLE
  *
