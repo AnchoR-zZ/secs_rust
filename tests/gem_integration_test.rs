@@ -1,7 +1,7 @@
 use secs_rust::gem::{
     communicator::GemCommunicator,
     config::{GemConfig, GemRole},
-    gem_state::{GemOfflineState, GemOnlineState, GemState},
+    state::{GemOfflineState, GemOnlineState, GemState},
     DeviceState,
 };
 use secs_rust::hsms::config::{ConnectionMode, HsmsConfig};

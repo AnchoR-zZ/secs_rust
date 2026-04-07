@@ -9,7 +9,7 @@ use criterion::{
 use futures::future::join_all;
 use secs_rust::gem::communicator::GemCommunicator;
 use secs_rust::gem::config::{GemConfig, GemRole};
-use secs_rust::gem::gem_state::{
+use secs_rust::gem::state::{
     DeviceState, GemControl, StateEvent, StateMachineConfig,
 };
 use secs_rust::gem::message as gem_message;

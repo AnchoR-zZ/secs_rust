@@ -1,11 +1,11 @@
-pub mod gem_state;
+pub mod state;
 pub mod config;
 pub mod message;
 pub mod communicator;
 pub(crate) mod manager;
 pub(crate) mod session;
 
-pub use gem_state::DeviceState;
+pub use state::DeviceState;
 
 use crate::hsms::message::HsmsMessage;
 use crate::hsms::HsmsError;

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use secs_rust::gem::gem_state::{
+use secs_rust::gem::state::{
     DeviceState, GemOfflineState, GemOnlineState, GemState, InitialControlOption, StateEvent,
     StateMachineConfig,
 };
@@ -79,7 +79,9 @@ pub fn i8(size: usize) -> Secs2 {
 }
 
 pub fn u1(size: usize) -> Secs2 {
-    let payload = (0..size).map(|index| (index % u8::MAX as usize) as u8).collect();
+    let payload = (0..size)
+        .map(|index| (index % u8::MAX as usize) as u8)
+        .collect();
     Secs2::U1(payload)
 }
 
@@ -128,7 +130,10 @@ pub fn nested_list(depth: usize) -> Secs2 {
             } else {
                 match index % 5 {
                     0 => Secs2::ASCII(format!("L{level}_I{index}")),
-                    1 => Secs2::U4(vec![(level * 100 + index) as u32, (level * 100 + index + 1) as u32]),
+                    1 => Secs2::U4(vec![
+                        (level * 100 + index) as u32,
+                        (level * 100 + index + 1) as u32,
+                    ]),
                     2 => Secs2::BOOLEAN(vec![index % 2 == 0, index % 3 == 0, true]),
                     3 => Secs2::BINARY(vec![level as u8, index as u8, (level + index) as u8]),
                     _ => Secs2::D8(vec![level as f64 + index as f64 / 10.0]),
@@ -160,10 +165,16 @@ pub fn secs2_real_world_cases() -> Vec<(&'static str, Secs2)> {
         (
             "s2f14_ec_data",
             Secs2::LIST(vec![
-                Secs2::LIST(vec![Secs2::U4(vec![1001]), Secs2::ASCII("LOT-A".to_string())]),
+                Secs2::LIST(vec![
+                    Secs2::U4(vec![1001]),
+                    Secs2::ASCII("LOT-A".to_string()),
+                ]),
                 Secs2::LIST(vec![Secs2::U4(vec![1002]), Secs2::BOOLEAN(vec![true])]),
                 Secs2::LIST(vec![Secs2::U4(vec![1003]), Secs2::D8(vec![12.5, 18.75])]),
-                Secs2::LIST(vec![Secs2::U4(vec![1004]), Secs2::BINARY(vec![0x12, 0x34, 0x56])]),
+                Secs2::LIST(vec![
+                    Secs2::U4(vec![1004]),
+                    Secs2::BINARY(vec![0x12, 0x34, 0x56]),
+                ]),
             ]),
         ),
         (
@@ -173,7 +184,10 @@ pub fn secs2_real_world_cases() -> Vec<(&'static str, Secs2)> {
                 Secs2::U4(vec![7]),
                 Secs2::LIST(vec![
                     Secs2::LIST(vec![Secs2::U4(vec![1]), Secs2::ASCII("IDLE".to_string())]),
-                    Secs2::LIST(vec![Secs2::U4(vec![2]), Secs2::BOOLEAN(vec![true, false, true])]),
+                    Secs2::LIST(vec![
+                        Secs2::U4(vec![2]),
+                        Secs2::BOOLEAN(vec![true, false, true]),
+                    ]),
                     Secs2::LIST(vec![Secs2::U4(vec![3]), nested_list(3)]),
                 ]),
             ]),
@@ -202,13 +216,7 @@ pub fn complex_nested_mixed_structure() -> Secs2 {
 }
 
 pub fn hsms_data_message(body_size: usize) -> HsmsMessage {
-    HsmsMessage::build_request_data_message(
-        0x1001,
-        6,
-        11,
-        0x0102_0304,
-        binary(body_size),
-    )
+    HsmsMessage::build_request_data_message(0x1001, 6, 11, 0x0102_0304, binary(body_size))
 }
 
 pub fn hsms_control_messages() -> Vec<(&'static str, HsmsMessage)> {
@@ -223,7 +231,10 @@ pub fn hsms_control_messages() -> Vec<(&'static str, HsmsMessage)> {
         ("deselect_rsp", HsmsMessage::deselect_rsp(&deselect_req, 0)),
         ("linktest_req", linktest_req.clone()),
         ("linktest_rsp", HsmsMessage::linktest_rsp(&linktest_req)),
-        ("separate_req", HsmsMessage::separate_req(0x1001, 0x1000_0004)),
+        (
+            "separate_req",
+            HsmsMessage::separate_req(0x1001, 0x1000_0004),
+        ),
     ]
 }
 
@@ -261,7 +272,12 @@ pub fn gem_representative_configs() -> Vec<(&'static str, StateMachineConfig)> {
     ]
 }
 
-pub fn gem_transition_scenarios() -> Vec<(&'static str, DeviceState, StateMachineConfig, Vec<StateEvent>)> {
+pub fn gem_transition_scenarios() -> Vec<(
+    &'static str,
+    DeviceState,
+    StateMachineConfig,
+    Vec<StateEvent>,
+)> {
     vec![
         (
             "not_connected_to_selected",
@@ -283,7 +299,10 @@ pub fn gem_transition_scenarios() -> Vec<(&'static str, DeviceState, StateMachin
             "remote_to_local_to_offline",
             DeviceState::Selected(GemState::OnlineState(GemOnlineState::Remote)),
             StateMachineConfig::default(),
-            vec![StateEvent::OperatorSetsLocalEvent, StateEvent::OperatorActuatesOfflineEvent],
+            vec![
+                StateEvent::OperatorSetsLocalEvent,
+                StateEvent::OperatorActuatesOfflineEvent,
+            ],
         ),
         (
             "host_offline_to_online_remote",
@@ -316,7 +335,8 @@ pub fn gem_transition_scenarios() -> Vec<(&'static str, DeviceState, StateMachin
     ]
 }
 
-pub fn gem_invalid_transition_cases() -> Vec<(&'static str, DeviceState, StateMachineConfig, StateEvent)> {
+pub fn gem_invalid_transition_cases(
+) -> Vec<(&'static str, DeviceState, StateMachineConfig, StateEvent)> {
     vec![
         (
             "ignored_s1f2_when_not_connected",

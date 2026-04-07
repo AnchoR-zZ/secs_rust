@@ -1,4 +1,4 @@
-use crate::gem::gem_state::StateMachineConfig;
+use crate::gem::state::control_state::StateMachineConfig;
 use crate::hsms::config::HsmsConfig;
 
 /// GEM 角色：设备端 (Equipment) 或 主机端 (Host)
@@ -40,7 +40,7 @@ impl Default for GemConfig {
 
 impl GemConfig {
     /// 创建 GEM 配置
-    /// 
+    ///
     /// # 参数
     /// - `role`: 角色（Equipment/Host）
     /// - `hsms_config`: 底层 HSMS 配置

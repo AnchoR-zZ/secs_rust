@@ -4,7 +4,7 @@
 //! 根据 GemRole (Equipment/Host) 自动处理 S1Fx 消息并驱动状态机。
 
 use crate::gem::config::GemRole;
-use crate::gem::gem_state::{GemControl, StateEvent, StateMachineConfig};
+use crate::gem::state::control_state::{GemControl, StateEvent, StateMachineConfig};
 use crate::gem::message;
 use crate::hsms::communicator::HsmsCommunicator;
 use crate::hsms::message::HsmsMessage;

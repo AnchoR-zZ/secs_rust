@@ -4,7 +4,7 @@
 //! 自动驱动 GemControl 状态机，透传非 GEM 消息给上层。
 
 use crate::gem::config::{GemConfig, GemRole};
-use crate::gem::gem_state::StateEvent;
+use crate::gem::state::control_state::StateEvent;
 use crate::gem::DeviceState;
 use crate::gem::session::{GemSession, MessageHandleResult};
 use crate::gem::{GemCommand, GemError};
@@ -169,11 +169,11 @@ impl GemManager {
                 if self.session.gem_control.state.is_offline() {
                     // 检查是否处于 AttemptOnLine
                     if let DeviceState::Selected(
-                        crate::gem::gem_state::GemState::OffLineState(
-                            crate::gem::gem_state::GemOfflineState::AttemptOnLine
+                        crate::gem::state::control_state::GemState::OffLineState(
+                            crate::gem::state::control_state::GemOfflineState::AttemptOnLine
                         )
                     ) = self.session.gem_control.state {
-                        self.session.attempt_online().await;
+                        self.session.initiate_communication().await;
                         self.broadcast_state();
                     }
                 }
@@ -212,8 +212,8 @@ impl GemManager {
 
                 // 如果进入了 AttemptOnLine，自动发送 S1F1
                 if let DeviceState::Selected(
-                    crate::gem::gem_state::GemState::OffLineState(
-                        crate::gem::gem_state::GemOfflineState::AttemptOnLine
+                    crate::gem::state::control_state::GemState::OffLineState(
+                        crate::gem::state::control_state::GemOfflineState::AttemptOnLine
                     )
                 ) = self.session.gem_control.state {
                     self.session.attempt_online().await;
