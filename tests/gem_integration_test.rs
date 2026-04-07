@@ -1,7 +1,7 @@
 use secs_rust::gem::{
     communicator::GemCommunicator,
     config::{GemConfig, GemRole},
-    state::{GemOfflineState, GemOnlineState, GemState},
+    state::{GemOfflineState, GemOnlineState, ControlState},
     DeviceState,
 };
 use secs_rust::hsms::config::{ConnectionMode, HsmsConfig};
@@ -178,8 +178,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "双端进入 Selected 后",
     );
 
@@ -202,8 +202,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OnlineState(GemOnlineState::Local)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "第一次 operator_online 后",
     );
 
@@ -232,8 +232,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OnlineState(GemOnlineState::Local)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "透传消息往返后",
     );
 
@@ -247,8 +247,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OnlineState(GemOnlineState::Remote)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Remote)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "set_remote 后",
     );
 
@@ -261,8 +261,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OnlineState(GemOnlineState::Local)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "set_local 后",
     );
 
@@ -288,7 +288,7 @@ async fn test_gem_full_state_lifecycle() {
         |s| {
             matches!(
                 s,
-                DeviceState::Selected(GemState::OffLineState(GemOfflineState::HostOffline))
+                DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline))
             )
         },
         "Equipment HostOffline",
@@ -299,8 +299,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::HostOffline)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "第一次 S1F15 后",
     );
 
@@ -331,8 +331,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OnlineState(GemOnlineState::Local)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "第一次 S1F17 后",
     );
 
@@ -346,8 +346,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "第一次 operator_offline 后",
     );
 
@@ -369,8 +369,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OnlineState(GemOnlineState::Local)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "第二次 operator_online 后",
     );
 
@@ -386,7 +386,7 @@ async fn test_gem_full_state_lifecycle() {
         |s| {
             matches!(
                 s,
-                DeviceState::Selected(GemState::OffLineState(GemOfflineState::HostOffline))
+                DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline))
             )
         },
         "Equipment HostOffline (second time)",
@@ -397,8 +397,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::HostOffline)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "第二次 S1F15 后",
     );
 
@@ -411,8 +411,8 @@ async fn test_gem_full_state_lifecycle() {
     assert_dual_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
-        DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
         "第二次 operator_offline 后",
     );
 

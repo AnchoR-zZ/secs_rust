@@ -169,7 +169,7 @@ impl GemManager {
                 if self.session.gem_control.state.is_offline() {
                     // 检查是否处于 AttemptOnLine
                     if let DeviceState::Selected(
-                        crate::gem::state::control_state::GemState::OffLineState(
+                        crate::gem::state::control_state::ControlState::OffLineState(
                             crate::gem::state::control_state::GemOfflineState::AttemptOnLine
                         )
                     ) = self.session.gem_control.state {
@@ -212,7 +212,7 @@ impl GemManager {
 
                 // 如果进入了 AttemptOnLine，自动发送 S1F1
                 if let DeviceState::Selected(
-                    crate::gem::state::control_state::GemState::OffLineState(
+                    crate::gem::state::control_state::ControlState::OffLineState(
                         crate::gem::state::control_state::GemOfflineState::AttemptOnLine
                     )
                 ) = self.session.gem_control.state {

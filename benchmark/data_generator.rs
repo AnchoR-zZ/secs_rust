@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use secs_rust::gem::state::{
-    DeviceState, GemOfflineState, GemOnlineState, GemState, InitialControlOption, StateEvent,
+    DeviceState, GemOfflineState, GemOnlineState, ControlState, InitialControlOption, StateEvent,
     StateMachineConfig,
 };
 use secs_rust::hsms::message::HsmsMessage;
@@ -287,7 +287,7 @@ pub fn gem_transition_scenarios() -> Vec<(
         ),
         (
             "offline_to_online_remote",
-            DeviceState::Selected(GemState::OffLineState(GemOfflineState::EquipmentOffLine)),
+            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
             StateMachineConfig::default(),
             vec![
                 StateEvent::OperatorActuatesOnlineEvent,
@@ -297,7 +297,7 @@ pub fn gem_transition_scenarios() -> Vec<(
         ),
         (
             "remote_to_local_to_offline",
-            DeviceState::Selected(GemState::OnlineState(GemOnlineState::Remote)),
+            DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Remote)),
             StateMachineConfig::default(),
             vec![
                 StateEvent::OperatorSetsLocalEvent,
@@ -306,7 +306,7 @@ pub fn gem_transition_scenarios() -> Vec<(
         ),
         (
             "host_offline_to_online_remote",
-            DeviceState::Selected(GemState::OffLineState(GemOfflineState::HostOffline)),
+            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline)),
             StateMachineConfig {
                 default_online_substate: GemOnlineState::Remote,
                 ..StateMachineConfig::default()
@@ -346,7 +346,7 @@ pub fn gem_invalid_transition_cases(
         ),
         (
             "ignored_select_when_online_local",
-            DeviceState::Selected(GemState::OnlineState(GemOnlineState::Local)),
+            DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
             StateMachineConfig::default(),
             StateEvent::SelectEvent,
         ),

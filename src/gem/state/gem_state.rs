@@ -1,13 +1,13 @@
 
 use super::control_state::{
-    GemOfflineState, GemOnlineState, GemState, InitialControlOption, StateEvent, StateMachineConfig,
+    GemOfflineState, GemOnlineState, ControlState, InitialControlOption, StateEvent, StateMachineConfig,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceState {
     NotConnected,
     NotSelected,
-    Selected(GemState),
+    Selected(ControlState),
 }
 
 impl serde::Serialize for DeviceState {
@@ -16,12 +16,12 @@ impl serde::Serialize for DeviceState {
             DeviceState::NotConnected => "NotConnected",
             DeviceState::NotSelected => "NotSelected",
             DeviceState::Selected(gem) => match gem {
-                GemState::OffLineState(off) => match off {
+                ControlState::OffLineState(off) => match off {
                     GemOfflineState::EquipmentOffLine => "EquipmentOffLine",
                     GemOfflineState::HostOffline => "HostOffline",
                     GemOfflineState::AttemptOnLine => "AttemptOnLine",
                 },
-                GemState::OnlineState(on) => match on {
+                ControlState::OnlineState(on) => match on {
                     GemOnlineState::Local => "OnlineLocal",
                     GemOnlineState::Remote => "OnlineRemote",
                 },
@@ -50,10 +50,10 @@ impl DeviceState {
                 StateEvent::SelectEvent => {
                     let gem_state = match config.initial_control_state {
                         InitialControlOption::OffLine => {
-                            GemState::OffLineState(config.initial_offline_substate.clone())
+                            ControlState::OffLineState(config.initial_offline_substate.clone())
                         }
                         InitialControlOption::OnLine => {
-                            GemState::OffLineState(GemOfflineState::AttemptOnLine)
+                            ControlState::OffLineState(GemOfflineState::AttemptOnLine)
                         }
                     };
                     DeviceState::Selected(gem_state)
@@ -79,11 +79,11 @@ impl DeviceState {
     }
 
     pub fn is_online(&self) -> bool {
-        matches!(self, DeviceState::Selected(GemState::OnlineState(_)))
+        matches!(self, DeviceState::Selected(ControlState::OnlineState(_)))
     }
 
     pub fn is_offline(&self) -> bool {
-        matches!(self, DeviceState::Selected(GemState::OffLineState(_)))
+        matches!(self, DeviceState::Selected(ControlState::OffLineState(_)))
     }
 }
 
