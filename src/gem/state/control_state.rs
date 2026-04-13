@@ -81,6 +81,23 @@ pub enum ControlState {
     OnlineState(GemOnlineState),
 }
 
+impl serde::Serialize for ControlState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let s = match self {
+            ControlState::OffLineState(off) => match off {
+                GemOfflineState::EquipmentOffLine => "EquipmentOffLine",
+                GemOfflineState::HostOffline => "HostOffline",
+                GemOfflineState::AttemptOnLine => "AttemptOnLine",
+            },
+            ControlState::OnlineState(on) => match on {
+                GemOnlineState::Local => "OnlineLocal",
+                GemOnlineState::Remote => "OnlineRemote",
+            },
+        };
+        serializer.serialize_str(s)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GemOnlineState {
     Local,
@@ -150,19 +167,33 @@ impl Default for StateMachineConfig {
 
 pub struct GemControl {
     pub state: super::gem_state::DeviceState,
-    pub config: StateMachineConfig,
+    pub control_config: StateMachineConfig,
+    pub comm_config: super::comm_state::CommStateMachineConfig,
 }
 
 impl GemControl {
-    pub fn new(config: StateMachineConfig) -> Self {
+    pub fn new(
+        control_config: StateMachineConfig,
+        comm_config: super::comm_state::CommStateMachineConfig,
+    ) -> Self {
         Self {
             state: super::gem_state::DeviceState::NotConnected,
-            config,
+            control_config,
+            comm_config,
         }
     }
 
-    pub fn handle_event(&mut self, event: StateEvent) {
-        self.state = self.state.on_event(event, &self.config);
+    pub fn handle_control_event(&mut self, event: StateEvent) {
+        self.state = self.state.on_control_event(event, &self.control_config);
+    }
+
+    pub fn handle_comm_event(
+        &mut self,
+        event: super::comm_state::CommEvent,
+    ) -> Vec<super::comm_state::CommAction> {
+        let (new_state, actions) = self.state.on_comm_event(event, &self.comm_config);
+        self.state = new_state;
+        actions
     }
 }
 
@@ -283,6 +314,7 @@ impl std::fmt::Display for GemOnlineState {
 
 #[cfg(test)]
 mod tests {
+    use super::super::comm_state::{CommState, CommStateMachineConfig};
     use super::super::gem_state::DeviceState;
     use super::*;
 
@@ -290,17 +322,28 @@ mod tests {
         StateMachineConfig::default()
     }
 
+    fn comm_cfg() -> CommStateMachineConfig {
+        CommStateMachineConfig::default()
+    }
+
+    fn selected(control: ControlState) -> DeviceState {
+        DeviceState::Selected {
+            comm_state: CommState::Disabled,
+            control_state: control,
+        }
+    }
+
     #[test]
     fn test_gem_control_wrapper() {
-        let mut control = GemControl::new(cfg());
+        let mut control = GemControl::new(cfg(), comm_cfg());
         assert_eq!(control.state, DeviceState::NotConnected);
         assert!(!control.state.is_connected());
 
-        control.handle_event(StateEvent::SocketConnectedEvent);
+        control.handle_control_event(StateEvent::SocketConnectedEvent);
         assert_eq!(control.state, DeviceState::NotSelected);
         assert!(control.state.is_connected());
 
-        control.handle_event(StateEvent::SelectEvent);
+        control.handle_control_event(StateEvent::SelectEvent);
         assert!(control.state.is_selected());
         assert!(control.state.is_offline());
     }
@@ -311,14 +354,14 @@ mod tests {
             initial_control_state: InitialControlOption::OnLine,
             ..cfg()
         };
-        let mut control = GemControl::new(config);
+        let mut control = GemControl::new(config, comm_cfg());
 
-        control.handle_event(StateEvent::SocketConnectedEvent);
-        control.handle_event(StateEvent::SelectEvent);
+        control.handle_control_event(StateEvent::SocketConnectedEvent);
+        control.handle_control_event(StateEvent::SelectEvent);
 
         assert_eq!(
             control.state,
-            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::AttemptOnLine))
+            selected(ControlState::OffLineState(GemOfflineState::AttemptOnLine))
         );
     }
 
@@ -328,30 +371,30 @@ mod tests {
             initial_offline_substate: GemOfflineState::HostOffline,
             ..cfg()
         };
-        let mut control = GemControl::new(config);
+        let mut control = GemControl::new(config, comm_cfg());
 
-        control.handle_event(StateEvent::SocketConnectedEvent);
-        control.handle_event(StateEvent::SelectEvent);
+        control.handle_control_event(StateEvent::SocketConnectedEvent);
+        control.handle_control_event(StateEvent::SelectEvent);
 
         assert_eq!(
             control.state,
-            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline))
+            selected(ControlState::OffLineState(GemOfflineState::HostOffline))
         );
     }
 
     #[test]
     fn test_query_helpers() {
-        let s = DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local));
+        let s = selected(ControlState::OnlineState(GemOnlineState::Local));
 
         assert!(s.is_connected());
         assert!(s.is_selected());
         assert!(s.is_online());
         assert!(!s.is_offline());
 
-        if let DeviceState::Selected(gem) = s {
-            assert!(gem.is_online());
-            assert!(gem.is_local());
-            assert!(!gem.is_remote());
+        if let Some(cs) = s.control_state() {
+            assert!(cs.is_online());
+            assert!(cs.is_local());
+            assert!(!cs.is_remote());
         }
     }
 
@@ -360,49 +403,53 @@ mod tests {
         let c = cfg();
         let s = DeviceState::NotConnected;
 
-        let s = s.on_event(StateEvent::SocketConnectedEvent, &c);
+        let s = s.on_control_event(StateEvent::SocketConnectedEvent, &c);
         assert_eq!(s, DeviceState::NotSelected);
 
-        let s = s.on_event(StateEvent::SelectEvent, &c);
+        let s = s.on_control_event(StateEvent::SelectEvent, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine))
+            selected(ControlState::OffLineState(
+                GemOfflineState::EquipmentOffLine
+            ))
         );
 
-        let s = s.on_event(StateEvent::OperatorActuatesOnlineEvent, &c);
+        let s = s.on_control_event(StateEvent::OperatorActuatesOnlineEvent, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::AttemptOnLine))
+            selected(ControlState::OffLineState(GemOfflineState::AttemptOnLine))
         );
 
-        let s = s.on_event(StateEvent::ReceivedS1F2Event, &c);
+        let s = s.on_control_event(StateEvent::ReceivedS1F2Event, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local))
+            selected(ControlState::OnlineState(GemOnlineState::Local))
         );
 
-        let s = s.on_event(StateEvent::OperatorSetsRemoteEvent, &c);
+        let s = s.on_control_event(StateEvent::OperatorSetsRemoteEvent, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Remote))
+            selected(ControlState::OnlineState(GemOnlineState::Remote))
         );
 
-        let s = s.on_event(StateEvent::OperatorSetsLocalEvent, &c);
+        let s = s.on_control_event(StateEvent::OperatorSetsLocalEvent, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local))
+            selected(ControlState::OnlineState(GemOnlineState::Local))
         );
     }
 
     #[test]
     fn test_transition_4_fail_to_equipment_offline() {
         let c = cfg();
-        let s = DeviceState::Selected(ControlState::OffLineState(GemOfflineState::AttemptOnLine));
+        let s = selected(ControlState::OffLineState(GemOfflineState::AttemptOnLine));
 
-        let s = s.on_event(StateEvent::ReceivedS1F0Event, &c);
+        let s = s.on_control_event(StateEvent::ReceivedS1F0Event, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine))
+            selected(ControlState::OffLineState(
+                GemOfflineState::EquipmentOffLine
+            ))
         );
     }
 
@@ -412,78 +459,82 @@ mod tests {
             attempt_online_fail_target: AttemptOnlineFailTarget::HostOffline,
             ..cfg()
         };
-        let s = DeviceState::Selected(ControlState::OffLineState(GemOfflineState::AttemptOnLine));
+        let s = selected(ControlState::OffLineState(GemOfflineState::AttemptOnLine));
 
-        let s = s.on_event(StateEvent::ReceivedS1F1ReplyTimeoutEvent, &c);
+        let s = s.on_control_event(StateEvent::ReceivedS1F1ReplyTimeoutEvent, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline))
+            selected(ControlState::OffLineState(GemOfflineState::HostOffline))
         );
     }
 
     #[test]
     fn test_transition_6_online_to_equipment_offline() {
         let c = cfg();
-        let s = DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local));
+        let s = selected(ControlState::OnlineState(GemOnlineState::Local));
 
-        let s = s.on_event(StateEvent::OperatorActuatesOfflineEvent, &c);
+        let s = s.on_control_event(StateEvent::OperatorActuatesOfflineEvent, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine))
+            selected(ControlState::OffLineState(
+                GemOfflineState::EquipmentOffLine
+            ))
         );
     }
 
     #[test]
     fn test_transition_10_s1f15_to_host_offline() {
         let c = cfg();
-        let s = DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Remote));
+        let s = selected(ControlState::OnlineState(GemOnlineState::Remote));
 
-        let s = s.on_event(StateEvent::ReceivedS1F15Event, &c);
+        let s = s.on_control_event(StateEvent::ReceivedS1F15Event, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline))
+            selected(ControlState::OffLineState(GemOfflineState::HostOffline))
         );
     }
 
     #[test]
     fn test_transition_11_host_offline_to_online() {
         let c = cfg();
-        let s = DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline));
+        let s = selected(ControlState::OffLineState(GemOfflineState::HostOffline));
 
-        let s = s.on_event(StateEvent::ReceivedS1F17Event, &c);
+        let s = s.on_control_event(StateEvent::ReceivedS1F17Event, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local))
+            selected(ControlState::OnlineState(GemOnlineState::Local))
         );
     }
 
     #[test]
     fn test_transition_12_host_offline_to_equipment_offline() {
         let c = cfg();
-        let s = DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline));
+        let s = selected(ControlState::OffLineState(GemOfflineState::HostOffline));
 
-        let s = s.on_event(StateEvent::OperatorActuatesOfflineEvent, &c);
+        let s = s.on_control_event(StateEvent::OperatorActuatesOfflineEvent, &c);
         assert_eq!(
             s,
-            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine))
+            selected(ControlState::OffLineState(
+                GemOfflineState::EquipmentOffLine
+            ))
         );
     }
 
     #[test]
     fn test_disconnect_from_selected() {
         let c = cfg();
-        let s = DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Remote));
+        let s = selected(ControlState::OnlineState(GemOnlineState::Remote));
 
-        let s = s.on_event(StateEvent::SocketDisconnectedEvent, &c);
+        let s = s.on_control_event(StateEvent::SocketDisconnectedEvent, &c);
         assert_eq!(s, DeviceState::NotConnected);
     }
 
     #[test]
     fn test_deselect() {
         let c = cfg();
-        let s = DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local));
+        let s = selected(ControlState::OnlineState(GemOnlineState::Local));
 
-        let s = s.on_event(StateEvent::DisSelectEvent, &c);
+        let s = s.on_control_event(StateEvent::DisSelectEvent, &c);
         assert_eq!(s, DeviceState::NotSelected);
     }
 
@@ -492,14 +543,18 @@ mod tests {
         let c = cfg();
         let s = DeviceState::NotConnected;
         assert_eq!(
-            s.on_event(StateEvent::SelectEvent, &c),
+            s.on_control_event(StateEvent::SelectEvent, &c),
             DeviceState::NotConnected
         );
 
-        let s = DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine));
+        let s = selected(ControlState::OffLineState(
+            GemOfflineState::EquipmentOffLine,
+        ));
         assert_eq!(
-            s.on_event(StateEvent::ReceivedS1F2Event, &c),
-            DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine))
+            s.on_control_event(StateEvent::ReceivedS1F2Event, &c),
+            selected(ControlState::OffLineState(
+                GemOfflineState::EquipmentOffLine
+            ))
         );
     }
 
@@ -509,16 +564,16 @@ mod tests {
         assert_eq!(
             format!(
                 "{}",
-                DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local))
+                selected(ControlState::OnlineState(GemOnlineState::Local))
             ),
-            "Selected(ON-LINE/LOCAL)"
+            "Selected(Comm=DISABLED, Control=ON-LINE/LOCAL)"
         );
         assert_eq!(
             format!(
                 "{}",
-                DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline))
+                selected(ControlState::OffLineState(GemOfflineState::HostOffline))
             ),
-            "Selected(OFF-LINE/Host OFF-LINE)"
+            "Selected(Comm=DISABLED, Control=OFF-LINE/Host OFF-LINE)"
         );
     }
 }

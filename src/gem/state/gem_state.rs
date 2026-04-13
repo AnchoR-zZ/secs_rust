@@ -1,54 +1,49 @@
-
+use super::comm_state::{CommAction, CommEvent, CommState, CommStateMachineConfig};
 use super::control_state::{
-    GemOfflineState, GemOnlineState, ControlState, InitialControlOption, StateEvent, StateMachineConfig,
+    ControlState, GemOfflineState, InitialControlOption, StateEvent, StateMachineConfig,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DeviceState {
     NotConnected,
     NotSelected,
-    Selected(ControlState),
+    Selected {
+        comm_state: CommState,
+        control_state: ControlState,
+    },
 }
 
 impl serde::Serialize for DeviceState {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let s = match self {
-            DeviceState::NotConnected => "NotConnected",
-            DeviceState::NotSelected => "NotSelected",
-            DeviceState::Selected(gem) => match gem {
-                ControlState::OffLineState(off) => match off {
-                    GemOfflineState::EquipmentOffLine => "EquipmentOffLine",
-                    GemOfflineState::HostOffline => "HostOffline",
-                    GemOfflineState::AttemptOnLine => "AttemptOnLine",
-                },
-                ControlState::OnlineState(on) => match on {
-                    GemOnlineState::Local => "OnlineLocal",
-                    GemOnlineState::Remote => "OnlineRemote",
-                },
-            },
-        };
-        serializer.serialize_str(s)
+        use serde::ser::SerializeStruct;
+        match self {
+            DeviceState::NotConnected => serializer.serialize_str("NotConnected"),
+            DeviceState::NotSelected => serializer.serialize_str("NotSelected"),
+            DeviceState::Selected {
+                comm_state,
+                control_state,
+            } => {
+                let mut s = serializer.serialize_struct("Selected", 2)?;
+                s.serialize_field("commState", &comm_state)?;
+                s.serialize_field("controlState", &control_state)?;
+                s.end()
+            }
+        }
     }
 }
 
-// ============================================================================
-// DeviceState — 设备完整通信状态（含 HSMS + GEM 子状态）
-// ============================================================================
-
 impl DeviceState {
-    pub fn on_event(&self, event: StateEvent, config: &StateMachineConfig) -> DeviceState {
+    pub fn on_control_event(&self, event: StateEvent, config: &StateMachineConfig) -> DeviceState {
         match self {
-            // --- NotConnected ---
             DeviceState::NotConnected => match event {
                 StateEvent::SocketConnectedEvent => DeviceState::NotSelected,
                 _ => self.clone(),
             },
 
-            // --- NotSelected ---
             DeviceState::NotSelected => match event {
                 StateEvent::SocketDisconnectedEvent => DeviceState::NotConnected,
                 StateEvent::SelectEvent => {
-                    let gem_state = match config.initial_control_state {
+                    let control_state = match config.initial_control_state {
                         InitialControlOption::OffLine => {
                             ControlState::OffLineState(config.initial_offline_substate.clone())
                         }
@@ -56,17 +51,62 @@ impl DeviceState {
                             ControlState::OffLineState(GemOfflineState::AttemptOnLine)
                         }
                     };
-                    DeviceState::Selected(gem_state)
+                    DeviceState::Selected {
+                        comm_state: CommState::Disabled,
+                        control_state,
+                    }
                 }
                 _ => self.clone(),
             },
 
-            // --- Selected: 委托给 GemState ---
-            DeviceState::Selected(gem) => match event {
+            DeviceState::Selected {
+                comm_state,
+                control_state,
+            } => match event {
                 StateEvent::SocketDisconnectedEvent => DeviceState::NotConnected,
                 StateEvent::DisSelectEvent => DeviceState::NotSelected,
-                _ => DeviceState::Selected(gem.on_event(event, config)),
+                _ => DeviceState::Selected {
+                    comm_state: comm_state.clone(),
+                    control_state: control_state.on_event(event, config),
+                },
             },
+        }
+    }
+
+    pub fn on_comm_event(
+        &self,
+        event: CommEvent,
+        config: &CommStateMachineConfig,
+    ) -> (DeviceState, Vec<CommAction>) {
+        match self {
+            DeviceState::Selected {
+                comm_state,
+                control_state,
+            } => {
+                let (new_comm, actions) = comm_state.on_event(event, config);
+                (
+                    DeviceState::Selected {
+                        comm_state: new_comm,
+                        control_state: control_state.clone(),
+                    },
+                    actions,
+                )
+            }
+            _ => (self.clone(), vec![]),
+        }
+    }
+
+    pub fn comm_state(&self) -> &CommState {
+        match self {
+            DeviceState::Selected { comm_state, .. } => comm_state,
+            _ => &CommState::Disabled,
+        }
+    }
+
+    pub fn control_state(&self) -> Option<&ControlState> {
+        match self {
+            DeviceState::Selected { control_state, .. } => Some(control_state),
+            _ => None,
         }
     }
 
@@ -75,28 +115,55 @@ impl DeviceState {
     }
 
     pub fn is_selected(&self) -> bool {
-        matches!(self, DeviceState::Selected(_))
+        matches!(self, DeviceState::Selected { .. })
+    }
+
+    pub fn is_communicating(&self) -> bool {
+        matches!(
+            self,
+            DeviceState::Selected {
+                comm_state: CommState::Enabled(super::comm_state::CommEnabledState::Communicating),
+                ..
+            }
+        )
     }
 
     pub fn is_online(&self) -> bool {
-        matches!(self, DeviceState::Selected(ControlState::OnlineState(_)))
+        matches!(
+            self,
+            DeviceState::Selected {
+                control_state: ControlState::OnlineState(_),
+                ..
+            }
+        )
     }
 
     pub fn is_offline(&self) -> bool {
-        matches!(self, DeviceState::Selected(ControlState::OffLineState(_)))
+        matches!(
+            self,
+            DeviceState::Selected {
+                control_state: ControlState::OffLineState(_),
+                ..
+            }
+        )
     }
 }
-
-// ============================================================================
-// Display 实现
-// ============================================================================
 
 impl std::fmt::Display for DeviceState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DeviceState::NotConnected => write!(f, "Not Connected"),
             DeviceState::NotSelected => write!(f, "Not Selected"),
-            DeviceState::Selected(gem) => write!(f, "Selected({})", gem),
+            DeviceState::Selected {
+                comm_state,
+                control_state,
+            } => {
+                write!(
+                    f,
+                    "Selected(Comm={}, Control={})",
+                    comm_state, control_state
+                )
+            }
         }
     }
 }

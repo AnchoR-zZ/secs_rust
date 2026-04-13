@@ -1,9 +1,10 @@
 //! GEM Manager — GEM 编排层
 //!
 //! 核心编排器：持有 HsmsCommunicator，监听 HSMS 状态变化和入站消息，
-//! 自动驱动 GemControl 状态机，透传非 GEM 消息给上层。
+//! 自动驱动 GemControl 状态机（CommState + ControlState），透传非 GEM 消息给上层。
 
 use crate::gem::config::{GemConfig, GemRole};
+use crate::gem::state::comm_state::CommEvent;
 use crate::gem::state::control_state::StateEvent;
 use crate::gem::DeviceState;
 use crate::gem::session::{GemSession, MessageHandleResult};
@@ -43,6 +44,7 @@ impl GemManager {
         let session = GemSession::new(
             config.role.clone(),
             config.state_machine_config.clone(),
+            config.comm_state_machine_config.clone(),
             hsms_communicator.clone(),
             config.mdln.clone(),
             config.softrev.clone(),
@@ -127,27 +129,26 @@ impl GemManager {
         match new_state {
             ConnectionState::NotConnected => {
                 tracing::info!("GEM: HSMS disconnected");
-                self.session.gem_control.handle_event(StateEvent::SocketDisconnectedEvent);
-                self.session.reset();
+                self.session.gem_control.handle_control_event(StateEvent::SocketDisconnectedEvent);
                 self.broadcast_state();
             }
 
             ConnectionState::NotSelected => {
                 if old_state == ConnectionState::NotConnected {
                     tracing::info!("GEM: HSMS connected (Not Selected)");
-                    self.session.gem_control.handle_event(StateEvent::SocketConnectedEvent);
+                    self.session.gem_control.handle_control_event(StateEvent::SocketConnectedEvent);
                 } else {
                     // Selected → NotSelected = Deselect
                     tracing::info!("GEM: HSMS deselected");
-                    self.session.gem_control.handle_event(StateEvent::DisSelectEvent);
-                    self.session.reset();
+                    self.session.gem_control.handle_control_event(StateEvent::DisSelectEvent);
                 }
                 self.broadcast_state();
             }
 
             ConnectionState::Selected => {
                 tracing::info!("GEM: HSMS selected");
-                self.session.gem_control.handle_event(StateEvent::SelectEvent);
+                self.session.gem_control.handle_control_event(StateEvent::SelectEvent);
+                self.session.gem_control.handle_comm_event(CommEvent::OperatorEnable);
                 self.broadcast_state();
 
                 // 自动发起 S1F13 通信建立
@@ -160,26 +161,26 @@ impl GemManager {
     async fn auto_establish_communication(&mut self) {
         match self.config.role {
             GemRole::Equipment => {
-                // Equipment 模式：主动发送 S1F13
                 tracing::info!("GEM: Equipment mode, initiating S1F13");
                 self.session.initiate_communication().await;
                 self.broadcast_state();
 
                 // 如果配置了初始状态为 OnLine，自动尝试上线
                 if self.session.gem_control.state.is_offline() {
-                    // 检查是否处于 AttemptOnLine
-                    if let DeviceState::Selected(
-                        crate::gem::state::control_state::ControlState::OffLineState(
-                            crate::gem::state::control_state::GemOfflineState::AttemptOnLine
-                        )
-                    ) = self.session.gem_control.state {
-                        self.session.initiate_communication().await;
-                        self.broadcast_state();
+                    if let Some(cs) = self.session.gem_control.state.control_state() {
+                        if matches!(
+                            cs,
+                            crate::gem::state::control_state::ControlState::OffLineState(
+                                crate::gem::state::control_state::GemOfflineState::AttemptOnLine
+                            )
+                        ) {
+                            self.session.attempt_online().await;
+                            self.broadcast_state();
+                        }
                     }
                 }
             }
             GemRole::Host => {
-                // Host 模式：等待 Equipment 发 S1F13，由 handle_inbound_message 自动回复
                 tracing::info!("GEM: Host mode, waiting for S1F13 from equipment");
             }
         }
@@ -190,12 +191,15 @@ impl GemManager {
         let result = self.session.handle_inbound_message(msg).await;
         match result {
             MessageHandleResult::Handled => {
-                // GEM 消息已处理，广播可能的状态变化
                 self.broadcast_state();
             }
             MessageHandleResult::Unhandled(msg) => {
-                // 非 GEM 消息，透传给上层
-                if self.to_communicator_inbound_msg_tx.send(msg).await.is_err() {
+                if self
+                    .to_communicator_inbound_msg_tx
+                    .send(msg)
+                    .await
+                    .is_err()
+                {
                     tracing::error!("GEM Manager: failed to forward message to app");
                 }
             }
@@ -207,17 +211,22 @@ impl GemManager {
         match cmd {
             GemCommand::OperatorOnline { reply_tx } => {
                 tracing::info!("GEM: Operator requests ON-LINE");
-                self.session.gem_control.handle_event(StateEvent::OperatorActuatesOnlineEvent);
+                self.session
+                    .gem_control
+                    .handle_control_event(StateEvent::OperatorActuatesOnlineEvent);
                 self.broadcast_state();
 
                 // 如果进入了 AttemptOnLine，自动发送 S1F1
-                if let DeviceState::Selected(
-                    crate::gem::state::control_state::ControlState::OffLineState(
-                        crate::gem::state::control_state::GemOfflineState::AttemptOnLine
-                    )
-                ) = self.session.gem_control.state {
-                    self.session.attempt_online().await;
-                    self.broadcast_state();
+                if let Some(cs) = self.session.gem_control.state.control_state() {
+                    if matches!(
+                        cs,
+                        crate::gem::state::control_state::ControlState::OffLineState(
+                            crate::gem::state::control_state::GemOfflineState::AttemptOnLine
+                        )
+                    ) {
+                        self.session.attempt_online().await;
+                        self.broadcast_state();
+                    }
                 }
 
                 let _ = reply_tx.send(Ok(()));
@@ -226,7 +235,9 @@ impl GemManager {
 
             GemCommand::OperatorOffline { reply_tx } => {
                 tracing::info!("GEM: Operator requests OFF-LINE");
-                self.session.gem_control.handle_event(StateEvent::OperatorActuatesOfflineEvent);
+                self.session
+                    .gem_control
+                    .handle_control_event(StateEvent::OperatorActuatesOfflineEvent);
                 self.broadcast_state();
                 let _ = reply_tx.send(Ok(()));
                 false
@@ -234,7 +245,9 @@ impl GemManager {
 
             GemCommand::SetLocal { reply_tx } => {
                 tracing::info!("GEM: Set LOCAL");
-                self.session.gem_control.handle_event(StateEvent::OperatorSetsLocalEvent);
+                self.session
+                    .gem_control
+                    .handle_control_event(StateEvent::OperatorSetsLocalEvent);
                 self.broadcast_state();
                 let _ = reply_tx.send(Ok(()));
                 false
@@ -242,7 +255,9 @@ impl GemManager {
 
             GemCommand::SetRemote { reply_tx } => {
                 tracing::info!("GEM: Set REMOTE");
-                self.session.gem_control.handle_event(StateEvent::OperatorSetsRemoteEvent);
+                self.session
+                    .gem_control
+                    .handle_control_event(StateEvent::OperatorSetsRemoteEvent);
                 self.broadcast_state();
                 let _ = reply_tx.send(Ok(()));
                 false
@@ -256,8 +271,6 @@ impl GemManager {
             }
 
             GemCommand::SendMessageWithReply { msg, reply_tx } => {
-                // Clone sender（O(1)，只复制 mpsc::Sender 和 watch::Receiver），
-                // 把等待回复放到独立 task，manager 立即继续处理后续命令（含 Shutdown）。
                 let comm = self.hsms_communicator.clone();
                 tokio::spawn(async move {
                     let result = comm.send_message_with_reply(msg).await;

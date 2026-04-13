@@ -9,7 +9,6 @@ use secs_rust::hsms::message::HsmsMessage;
 use secs_rust::secs2::Secs2;
 use std::time::Duration;
 
-/// 辅助函数：等待 GEM 状态满足条件，带超时
 async fn wait_gem_state(
     rx: &mut tokio::sync::watch::Receiver<DeviceState>,
     pred: impl Fn(&DeviceState) -> bool,
@@ -33,42 +32,31 @@ async fn wait_gem_state(
     );
 }
 
-fn assert_dual_states(
+fn assert_control_states(
     eq_comm: &GemCommunicator,
     host_comm: &GemCommunicator,
-    expected_eq: DeviceState,
-    expected_host: DeviceState,
+    expected_eq_control: ControlState,
+    expected_host_control: ControlState,
     context: &str,
 ) {
+    let eq_state = eq_comm.state();
+    let host_state = host_comm.state();
     assert_eq!(
-        eq_comm.state(),
-        expected_eq,
-        "{}: equipment state mismatch",
-        context
+        eq_state.control_state(),
+        Some(&expected_eq_control),
+        "{}: equipment control state mismatch (full state: {:?})",
+        context,
+        eq_state
     );
     assert_eq!(
-        host_comm.state(),
-        expected_host,
-        "{}: host state mismatch",
-        context
+        host_state.control_state(),
+        Some(&expected_host_control),
+        "{}: host control state mismatch (full state: {:?})",
+        context,
+        host_state
     );
 }
 
-/// 测试 GEM 完整状态机转换生命周期（单方法模拟真实流程）
-///
-/// 模拟一个设备从上电到完整运行的真实生命周期：
-///   NotConnected → NotSelected → Selected(EquipmentOffLine)
-///   → operator_online → AttemptOnLine → OnLine/Local
-///   → 数据消息透传验证 (S2F17/S2F18)
-///   → set_remote → OnLine/Remote
-///   → set_local → OnLine/Local
-///   → Host S1F15 → HostOffline
-///   → Host S1F17 → OnLine/Local
-///   → operator_offline → EquipmentOffLine
-///   → operator_online → OnLine/Local (再次上线)
-///   → Host S1F15 → HostOffline
-///   → operator_offline → EquipmentOffLine
-///   → Shutdown 优雅退出
 #[tokio::test]
 async fn test_gem_full_state_lifecycle() {
     let _ = tracing_subscriber::fmt()
@@ -104,7 +92,6 @@ async fn test_gem_full_state_lifecycle() {
         "设备初始状态应为 NotConnected"
     );
 
-    // 消耗设备端透传消息（非 GEM 消息自动回复 "EQ_REPLY"）
     let eq_reply_comm = eq_comm.clone();
     tokio::spawn(async move {
         while let Some(msg) = eq_msg_rx.recv().await {
@@ -145,21 +132,14 @@ async fn test_gem_full_state_lifecycle() {
     let (host_comm, mut host_msg_rx) = GemCommunicator::new(host_config);
     let mut host_state_rx = host_comm.state_rx();
 
-    assert_dual_states(
-        &eq_comm,
-        &host_comm,
-        DeviceState::NotConnected,
-        DeviceState::NotConnected,
-        "初始化后双端状态",
-    );
+    assert_eq!(eq_comm.state(), DeviceState::NotConnected);
+    assert_eq!(host_comm.state(), DeviceState::NotConnected);
 
-    // 消耗主机端透传消息
     tokio::spawn(async move {
         while let Some(_msg) = host_msg_rx.recv().await {}
     });
 
     // ── 阶段 1: 等待双端 Selected ──────────────────────────────────
-    // 转换: NotConnected → NotSelected → Selected(EquipmentOffLine)
     wait_gem_state(
         &mut eq_state_rx,
         |s| s.is_selected(),
@@ -175,17 +155,15 @@ async fn test_gem_full_state_lifecycle() {
     )
     .await;
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "双端进入 Selected 后",
     );
 
     // ── 阶段 2: 操作员上线 ─────────────────────────────────────────
-    // 转换 #3: EquipmentOffLine → AttemptOnLine
-    // 转换 #5: AttemptOnLine → OnLine/Local (通过 S1F1/S1F2)
     eq_comm
         .operator_online()
         .await
@@ -199,16 +177,15 @@ async fn test_gem_full_state_lifecycle() {
     )
     .await;
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OnlineState(GemOnlineState::Local),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "第一次 operator_online 后",
     );
 
     // ── 阶段 2.5: 数据消息透传验证 ────────────────────────────────
-    // 非 S1Fx 消息应透传给上层，不被 GEM 拦截
     let req = HsmsMessage::build_request_data_message(
         0,
         2,
@@ -229,52 +206,48 @@ async fn test_gem_full_state_lifecycle() {
         other => panic!("透传回复 body 应为 ASCII, 实际: {:?}", other),
     }
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OnlineState(GemOnlineState::Local),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "透传消息往返后",
     );
 
     // ── 阶段 3: Local ↔ Remote 切换 ───────────────────────────────
-    // 转换 #8: Local → Remote
     eq_comm
         .set_remote()
         .await
         .expect("set_remote 应成功");
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Remote)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OnlineState(GemOnlineState::Remote),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "set_remote 后",
     );
 
-    // 转换 #9: Remote → Local
     eq_comm
         .set_local()
         .await
         .expect("set_local 应成功");
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OnlineState(GemOnlineState::Local),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "set_local 后",
     );
 
     // ── 阶段 4: 主机请求离线 (S1F15/S1F16) ────────────────────────
-    // 转换 #10: OnLine → HostOffline
     let s1f15 = secs_rust::gem::message::build_s1f15();
     let s1f16 = host_comm
         .send_message_with_reply(s1f15)
         .await
         .expect("S1F15 发送应成功");
 
-    // 验证 S1F16 回复
     assert_eq!(s1f16.header.stream, 1, "S1F16 reply stream 应为 1");
     assert_eq!(s1f16.header.function, 16, "S1F16 reply function 应为 16");
     match &s1f16.body {
@@ -282,13 +255,12 @@ async fn test_gem_full_state_lifecycle() {
         other => panic!("S1F16 body 应为 BINARY, 实际: {:?}", other),
     }
 
-    // 等待设备端状态更新
     wait_gem_state(
         &mut eq_state_rx,
         |s| {
             matches!(
-                s,
-                DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline))
+                s.control_state(),
+                Some(ControlState::OffLineState(GemOfflineState::HostOffline))
             )
         },
         "Equipment HostOffline",
@@ -296,23 +268,21 @@ async fn test_gem_full_state_lifecycle() {
     )
     .await;
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OffLineState(GemOfflineState::HostOffline),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "第一次 S1F15 后",
     );
 
     // ── 阶段 5: 主机请求上线 (S1F17/S1F18) ────────────────────────
-    // 转换 #11: HostOffline → OnLine/Local
     let s1f17 = secs_rust::gem::message::build_s1f17();
     let s1f18 = host_comm
         .send_message_with_reply(s1f17)
         .await
         .expect("S1F17 发送应成功");
 
-    // 验证 S1F18 回复
     assert_eq!(s1f18.header.stream, 1, "S1F18 reply stream 应为 1");
     assert_eq!(s1f18.header.function, 18, "S1F18 reply function 应为 18");
     match &s1f18.body {
@@ -328,31 +298,29 @@ async fn test_gem_full_state_lifecycle() {
     )
     .await;
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OnlineState(GemOnlineState::Local),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "第一次 S1F17 后",
     );
 
     // ── 阶段 6: 操作员主动离线 ─────────────────────────────────────
-    // 转换 #6: OnLine → EquipmentOffLine
     eq_comm
         .operator_offline()
         .await
         .expect("operator_offline 应成功");
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "第一次 operator_offline 后",
     );
 
     // ── 阶段 7: 再次上线后由主机 S1F15 → HostOffline → 操作员离线 ─
-    // 转换 #3 + #5: 再次上线
     eq_comm
         .operator_online()
         .await
@@ -366,15 +334,14 @@ async fn test_gem_full_state_lifecycle() {
     )
     .await;
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OnlineState(GemOnlineState::Local)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OnlineState(GemOnlineState::Local),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "第二次 operator_online 后",
     );
 
-    // 转换 #10: 主机再次请求离线
     let s1f15_2 = secs_rust::gem::message::build_s1f15();
     let _ = host_comm
         .send_message_with_reply(s1f15_2)
@@ -385,8 +352,8 @@ async fn test_gem_full_state_lifecycle() {
         &mut eq_state_rx,
         |s| {
             matches!(
-                s,
-                DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline))
+                s.control_state(),
+                Some(ControlState::OffLineState(GemOfflineState::HostOffline))
             )
         },
         "Equipment HostOffline (second time)",
@@ -394,11 +361,11 @@ async fn test_gem_full_state_lifecycle() {
     )
     .await;
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::HostOffline)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OffLineState(GemOfflineState::HostOffline),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "第二次 S1F15 后",
     );
 
@@ -408,11 +375,11 @@ async fn test_gem_full_state_lifecycle() {
         .await
         .expect("从 HostOffline 操作员离线应成功");
 
-    assert_dual_states(
+    assert_control_states(
         &eq_comm,
         &host_comm,
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
-        DeviceState::Selected(ControlState::OffLineState(GemOfflineState::EquipmentOffLine)),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
+        ControlState::OffLineState(GemOfflineState::EquipmentOffLine),
         "第二次 operator_offline 后",
     );
 

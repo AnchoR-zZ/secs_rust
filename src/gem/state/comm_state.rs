@@ -74,6 +74,25 @@ pub enum CommState {
     Enabled(CommEnabledState),
 }
 
+impl serde::Serialize for CommState {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let s = match self {
+            CommState::Disabled => "Disabled",
+            CommState::Enabled(CommEnabledState::Communicating) => "Communicating",
+            CommState::Enabled(CommEnabledState::NotCommunicating(
+                CommConnectState::EquipmentInitiated(EqInitState::WaitCra),
+            )) => "WaitCra",
+            CommState::Enabled(CommEnabledState::NotCommunicating(
+                CommConnectState::EquipmentInitiated(EqInitState::WaitDelay),
+            )) => "WaitDelay",
+            CommState::Enabled(CommEnabledState::NotCommunicating(
+                CommConnectState::HostInitiated,
+            )) => "HostInitiated",
+        };
+        serializer.serialize_str(s)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommEnabledState {
     NotCommunicating(CommConnectState),

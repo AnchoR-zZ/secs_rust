@@ -1,3 +1,4 @@
+use crate::gem::state::comm_state::CommStateMachineConfig;
 use crate::gem::state::control_state::StateMachineConfig;
 use crate::hsms::config::HsmsConfig;
 
@@ -14,15 +15,11 @@ pub enum GemRole {
 /// GEM 层配置
 #[derive(Debug, Clone)]
 pub struct GemConfig {
-    /// GEM 角色
     pub role: GemRole,
-    /// 内嵌 HSMS 配置
     pub hsms_config: HsmsConfig,
-    /// GEM 状态机配置
     pub state_machine_config: StateMachineConfig,
-    /// 设备型号名 (MDLN)，用于 S1F2/S1F13/S1F14
+    pub comm_state_machine_config: CommStateMachineConfig,
     pub mdln: String,
-    /// 软件版本 (SOFTREV)，用于 S1F2/S1F13/S1F14
     pub softrev: String,
 }
 
@@ -32,6 +29,7 @@ impl Default for GemConfig {
             role: GemRole::default(),
             hsms_config: HsmsConfig::default(),
             state_machine_config: StateMachineConfig::default(),
+            comm_state_machine_config: CommStateMachineConfig::default(),
             mdln: "SECS-SIMULATOR".to_string(),
             softrev: "1.0.0".to_string(),
         }
@@ -59,6 +57,7 @@ impl GemConfig {
             role,
             hsms_config,
             state_machine_config: state_machine_config.unwrap_or(defaults.state_machine_config),
+            comm_state_machine_config: defaults.comm_state_machine_config,
             mdln: mdln.unwrap_or(defaults.mdln),
             softrev: softrev.unwrap_or(defaults.softrev),
         }
