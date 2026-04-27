@@ -27,8 +27,3 @@ path = "benchmark/secs2_benchmark.rs"
 name = "hsms_benchmark"
 harness = false
 path = "benchmark/hsms_benchmark.rs"
-
-[[bench]]
-name = "gem_benchmark"
-harness = false
-path = "benchmark/gem_benchmark.rs"
