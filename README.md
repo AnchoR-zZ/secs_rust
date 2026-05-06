@@ -1,6 +1,6 @@
 # secs_rust
 
-`secs_rust` 是一个面向半导体设备通信场景的 Rust 库，提供 SECS-II 数据建模与编解码、HSMS 传输层、GEM 控制状态机，以及 SML 文本格式解析与格式化能力。
+`secs_rust` 是一个面向半导体设备通信场景的 Rust 库，提供 SECS-II 数据建模与编解码、HSMS 传输层，以及 SML 文本格式解析与格式化能力。
 
 > ⚠️ 本项目未经生产环境验证，可能存在未发现的 bug。目前仅作为学习 Rust 的个人项目使用，不建议直接用于生产环境。
 
@@ -8,7 +8,6 @@
 
 - `secs2`: SECS-II 数据类型、二进制编码与解码。
 - `hsms`: 基于 Tokio 的 HSMS 连接管理、控制消息和数据消息收发。
-- `gem`: 在 HSMS 之上实现设备端/主机端角色和 GEM 控制状态机。
 - `sml`: SML 文本消息解析与格式化，便于调试和测试。
 - `util`: 辅助工具，例如系统字节生成。
 
@@ -19,7 +18,6 @@ pub mod hsms;
 pub mod secs2;
 pub mod util;
 pub mod sml;
-pub mod gem;
 ```
 
 ## 何时选哪一层 API
@@ -28,16 +26,12 @@ pub mod gem;
 
 如果你已经有明确的主动/被动建连逻辑，只需要 HSMS 连接状态、控制报文和请求-回复模型，使用 `secs_rust::hsms::communicator::HsmsCommunicator`。
 
-如果你需要设备端或主机端的 GEM 控制流转，例如上线、下线、Local/Remote 切换，以及对 S1F1、S1F15、S1F17 这类消息的状态联动处理，使用 `secs_rust::gem::communicator::GemCommunicator`。
-
 如果你需要把消息转成可读文本，或者把 SML 文本还原成结构化消息，使用 `secs_rust::sml`。
 
 ## 架构分层
 
 ```text
 Application
-  |
-  +-- gem::GemCommunicator        Gem协议实现
   |
   +-- hsms::HsmsCommunicator      HSMS协议实现
   |
@@ -167,70 +161,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 更完整的连接生命周期、Deselect、Separate 和自动重连流程，可直接参考 `tests/hsms_integration_test.rs`。
 
-### 3. 最小 GEM 设备端/主机端流程
-
-`GemCommunicator` 封装了 HSMS 层，并额外提供设备状态机控制。它适合把“连接状态 + 控制状态 + 透传消息”统一放在一套接口里处理。
-
-```rust
-use secs_rust::gem::{
-    communicator::GemCommunicator,
-    config::{GemConfig, GemRole},
-};
-use secs_rust::hsms::config::{ConnectionMode, HsmsConfig};
-use std::time::Duration;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let equipment_hsms = HsmsConfig {
-        mode: ConnectionMode::Passive,
-        ip: "127.0.0.1".to_string(),
-        port: 15200,
-        t3: Duration::from_secs(3),
-        t6: Duration::from_secs(3),
-        ..Default::default()
-    };
-
-    let host_hsms = HsmsConfig {
-        mode: ConnectionMode::Active,
-        ip: "127.0.0.1".to_string(),
-        port: 15200,
-        t3: Duration::from_secs(3),
-        t6: Duration::from_secs(3),
-        ..Default::default()
-    };
-
-    let equipment_config = GemConfig {
-        role: GemRole::Equipment,
-        hsms_config: equipment_hsms,
-        ..Default::default()
-    };
-
-    let host_config = GemConfig {
-        role: GemRole::Host,
-        hsms_config: host_hsms,
-        ..Default::default()
-    };
-
-    let (equipment, _equipment_rx) = GemCommunicator::new(equipment_config);
-    let (host, _host_rx) = GemCommunicator::new(host_config);
-
-    let mut eq_state_rx = equipment.state_rx();
-    while !eq_state_rx.borrow().is_selected() {
-        eq_state_rx.changed().await?;
-    }
-
-    equipment.operator_online().await?;
-    equipment.set_remote().await?;
-    equipment.set_local().await?;
-
-    host.shutdown().await?;
-    equipment.shutdown().await?;
-    Ok(())
-}
-```
-
-完整的上线、下线、Local/Remote 切换以及透传消息验证，请参考 `tests/gem_integration_test.rs`。
-
 ## 核心 API 导览
 
 ### `secs2`
@@ -257,21 +187,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `Selected`
 
 这一层适合自己管理业务状态，但不想自己重写 HSMS 控制命令的场景。
-
-### `gem`
-
-- `GemCommunicator::new(config) -> (GemCommunicator, mpsc::Receiver<HsmsMessage>)`
-- `operator_online()`
-- `operator_offline()`
-- `set_local()`
-- `set_remote()`
-- `send_message(...)`
-- `send_message_with_reply(...)`
-- `send_reply(...)`
-- `state() / state_rx()`
-- `shutdown()`
-
-`GemCommunicator` 返回的接收器只承接非 GEM 的透传消息；GEM 控制相关的 S1Fx 处理由内部状态机接管。
 
 ### `sml`
 
@@ -300,32 +215,6 @@ fn main() {
 }
 ```
 
-## 状态模型
-
-`DeviceState` 把 HSMS 连接状态和 GEM 控制状态组合在一起：
-
-- `NotConnected`
-- `NotSelected`
-- `Selected(GemState)`
-
-其中 `GemState` 又分为：
-
-- `OffLineState(EquipmentOffLine)`
-- `OffLineState(HostOffline)`
-- `OffLineState(AttemptOnLine)`
-- `OnlineState(Local)`
-- `OnlineState(Remote)`
-
-对设备端来说，典型流转通常是：
-
-1. TCP 建立后进入 `NotSelected`。
-2. Select 成功后进入 `Selected(...)`。
-3. `operator_online()` 触发 `EquipmentOffLine -> AttemptOnLine -> OnlineState(Local)`。
-4. `set_remote()` 和 `set_local()` 在 `Local` 与 `Remote` 之间切换。
-5. `operator_offline()` 使设备回到 `EquipmentOffLine`。
-
-更完整的状态机定义在 `src/gem/gem_state.rs` 中，测试用例则给出了实际事件序列。
-
 ## 配置要点
 
 ### `HsmsConfig`
@@ -350,20 +239,9 @@ fn main() {
 - `Passive` 表示本地监听，等待远端连接。
 - `t3` 到 `t8` 对应 HSMS 常用超时参数。
 
-### `GemConfig`
-
-重点字段包括：
-
-- `role`: `Equipment` 或 `Host`
-- `hsms_config`: 底层 HSMS 配置
-- `state_machine_config`: GEM 状态机初始条件
-- `mdln`: 设备型号名
-- `softrev`: 软件版本号
-
 ## 当前约束与注意事项
 
 - 该库未经生产验证，可能存在未发现的 bug，个人用于学习 Rust 的项目。
-- `GemCommunicator` 会拦截并处理 GEM 控制相关消息，透传给上层的只有非 GEM 数据消息。
 - 测试和 benchmark 中大量使用固定端口，编写并行测试时需要主动规避端口冲突。
 
 ## 验证方式
@@ -380,13 +258,11 @@ cargo bench
 
 ```bash
 cargo test --test hsms_integration_test
-cargo test --test gem_integration_test
 ```
 
 如果只想跑基准测试：
 
 ```bash
 cargo bench hsms_benchmark
-cargo bench gem_benchmark
 cargo bench secs2_benchmark
 ```
