@@ -1,7 +1,7 @@
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while},
-    character::complete::{char, digit1, hex_digit1, multispace0, multispace1},
+    character::complete::{char, digit1, hex_digit1, multispace0},
     combinator::{map, map_res, opt, recognize, value},
     multi::many0,
     sequence::{delimited, preceded},
@@ -88,10 +88,25 @@ fn parse_number<T: FromStr>(input: &str) -> IResult<&str, T, SmlError<&str>> {
 
 fn parse_list(input: &str) -> IResult<&str, Secs2, SmlError<&str>> {
     let (input, _) = tag("<L").parse(input)?;
-    // Optional length [n] - ignored for now as we just parse all children
-    let (input, _) = opt(preceded(multispace1, digit1)).parse(input)?; 
+    let (input, declared_len) = opt(preceded(
+        multispace0,
+        alt((
+            delimited(char('['), map_res(digit1, |s: &str| s.parse::<usize>()), char(']')),
+            map_res(digit1, |s: &str| s.parse::<usize>()),
+        )),
+    )).parse(input)?;
     let (input, items) = many0(ws(parse_item)).parse(input)?;
     let (input, _) = char('>').parse(input)?;
+
+    if let Some(expected) = declared_len {
+        if items.len() != expected {
+            return Err(nom::Err::Failure(SmlError::InvalidFormat(format!(
+                "List length marker says {} but found {} items",
+                expected, items.len()
+            ))));
+        }
+    }
+
     Ok((input, Secs2::LIST(items)))
 }
 

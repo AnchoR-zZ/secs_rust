@@ -1,5 +1,6 @@
 use crate::secs2::Secs2;
 use super::parser::{parse_sml, SmlMessage};
+use super::error::SmlError;
 
 #[test]
 fn test_simple_header_wait() {
@@ -105,4 +106,100 @@ fn test_boolean_type() {
     } else {
         panic!("Expected BOOLEAN");
     }
+}
+
+#[test]
+fn test_list_with_bracket_length_marker() {
+    let input = r#"S1F1 <L[2] <A "a"> <A "b">> ."#;
+    let (_, msg) = parse_sml(input).unwrap();
+    if let Some(Secs2::LIST(items)) = msg.body {
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            Secs2::ASCII(s) => assert_eq!(s, "a"),
+            _ => panic!("Expected ASCII"),
+        }
+        match &items[1] {
+            Secs2::ASCII(s) => assert_eq!(s, "b"),
+            _ => panic!("Expected ASCII"),
+        }
+    } else {
+        panic!("Expected LIST body");
+    }
+}
+
+#[test]
+fn test_list_with_bare_length_marker() {
+    let input = r#"S1F1 <L 2 <A "a"> <A "b">> ."#;
+    let (_, msg) = parse_sml(input).unwrap();
+    if let Some(Secs2::LIST(items)) = msg.body {
+        assert_eq!(items.len(), 2);
+    } else {
+        panic!("Expected LIST body");
+    }
+}
+
+#[test]
+fn test_list_with_zero_length_marker() {
+    let input = r#"S1F1 <L[0]> ."#;
+    let (_, msg) = parse_sml(input).unwrap();
+    if let Some(Secs2::LIST(items)) = msg.body {
+        assert!(items.is_empty());
+    } else {
+        panic!("Expected LIST body");
+    }
+}
+
+#[test]
+fn test_list_length_mismatch() {
+    let input = r#"S1F1 <L[3] <A "a"> <A "b">> ."#;
+    let result = parse_sml(input);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    match err {
+        nom::Err::Failure(SmlError::InvalidFormat(msg)) => {
+            assert!(msg.contains("3"));
+            assert!(msg.contains("2"));
+        }
+        _ => panic!("Expected Failure with InvalidFormat, got: {:?}", err),
+    }
+}
+
+#[test]
+fn test_nested_list_with_length_markers() {
+    let input = r#"
+        S1F1 W
+        <L[2]
+            <A "MDLN">
+            <L[2]
+                <U1 1>
+                <U2 200>
+            >
+        >
+        .
+    "#;
+    let (_, msg) = parse_sml(input).unwrap();
+    if let Some(Secs2::LIST(items)) = msg.body {
+        assert_eq!(items.len(), 2);
+        if let Secs2::LIST(sub_items) = &items[1] {
+            assert_eq!(sub_items.len(), 2);
+        } else {
+            panic!("Expected nested LIST");
+        }
+    } else {
+        panic!("Expected LIST body");
+    }
+}
+
+#[test]
+fn test_format_parse_roundtrip() {
+    use super::formatter::{SmlFormatter, FormatStyle};
+
+    let original = Secs2::LIST(vec![
+        Secs2::ASCII("hello".into()),
+        Secs2::U4(vec![1, 2]),
+    ]);
+    let formatted = SmlFormatter::new(FormatStyle::Compact).format(&original);
+    let sml_input = format!("S1F1 {} .", formatted);
+    let (_, msg) = parse_sml(&sml_input).unwrap();
+    assert_eq!(msg.body, Some(original));
 }
