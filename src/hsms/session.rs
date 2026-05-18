@@ -67,11 +67,11 @@ impl HsmsSession {
         let mut linktest_interval = time::interval(self.config.linktest);
         linktest_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        // General Timer Check (T3, T6, etc.) - Check every 1s
-        let mut timer_check_interval = time::interval(Duration::from_secs(1));
+        // General Timer Check (T3, T6, etc.) - Check every 200ms
+        let mut timer_check_interval = time::interval(Duration::from_millis(200));
         timer_check_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        // T8 (Check every 1s)
-        let mut t8_check_interval = time::interval(Duration::from_secs(1));
+        // T8 (Check every 200ms)
+        let mut t8_check_interval = time::interval(Duration::from_millis(200));
         t8_check_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         match self.config.mode {
