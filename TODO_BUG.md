@@ -16,19 +16,20 @@ formatter 正确转义了 `"`, `\n`, `\r`, `\t`, `\`，但 parser 的 `parse_str
 
 **建议：** 在 parser 中实现完整的转义序列处理（`\\`, `\"`, `\n`, `\r`, `\t`）。
 
-### 3. Secs2::EMPTY 编码为空 Vec 而非正确的空字节表示
+### 3. ~~Secs2::EMPTY 编码为空 Vec 而非正确的空字节表示~~ [非 Bug / 保持现状]
 `src/secs2/encoder.rs:20`
 
-`Secs2::EMPTY` 编码时返回 `vec![]`（零字节），不是标准的 SECS-II 消息体。在 LIST 内部编码为空字节时，接收方无法区分"空项"和"缺少项"。
+经分析，`Secs2::EMPTY => Ok(vec![])` 是**正确行为**：
+1. `EMPTY` 主要用于 HSMS 控制消息（Select/Deselect/Linktest 等），按 SEMI E.37 规范 body 应为 0 字节
+2. 若编码为 `[0x01, 0x00]`（空 LIST），HSMS 帧会有 2 字节 body，违反协议
+3. `LIST` 内部包含 `EMPTY` 的场景在 SECS-II 标准中本就不存在独立"空项"类型；如需表示空列表应使用 `LIST(vec![])`（已正确编码为 `[0x01, 0x00]`）
 
-**建议：** 编码为正确的 SECS-II 项，例如 `build_header(FormatCode::List.code(), 0)` 产生 `[0x01, 0x00]`。
+**结论：** 无需修改编码逻辑。如需语义保护，可在 `encode_list` 中校验子项不含 `EMPTY`。
 
-### 4. Passive 模式缺少 SO_REUSEADDR，session 结束后重连 bind 可能失败
-`src/hsms/manager.rs:168-186`
+### 4. ~~Passive 模式缺少 SO_REUSEADDR，session 结束后重连 bind 可能失败~~ [已修复]
+`src/hsms/manager.rs`
 
-`accept_loop_inner` 在 session 结束后会被再次调用，重新 `TcpListener::bind`。前一个 session 的 TCP 连接可能仍处于 `TIME_WAIT` 状态，导致 bind 失败（`Address already in use`）。当前用 5 秒重试间隔缓解，但引入不必要的重连延迟，在 Windows 上尤其严重。
-
-**建议：** 使用 `socket2` 或 tokio 的 `TcpSocket::set_reuseaddr(true)` 在 bind 前设置 `SO_REUSEADDR`。
+采用更优方案：将 `TcpListener` 绑定提到 `run()` 循环之前，跨 session 复用同一个 listener，彻底避免 re-bind 问题。原 `accept_loop_inner` 拆分为 `bind_with_retry` + `accept_connection`。无需引入 `socket2` 依赖。
 
 ---
 
@@ -43,21 +44,15 @@ formatter 正确转义了 `"`, `\n`, `\r`, `\t`, `\`，但 parser 的 `parse_str
 
 **建议：** 将 Select/Deselect 的 pending replies 存入 `t6_replies`，或添加独立的控制事务超时跟踪。
 
-### 6. HsmsMessageCodec::decode 中不必要的 Vec 分配
+### 6. ~~HsmsMessageCodec::decode 中不必要的 Vec 分配~~ [已修复]
 `src/hsms/message.rs:252-258`
 
-每次 decode 都执行 `msg_data[..10].to_vec()` 和 `msg_data.to_vec()` 进行额外堆分配。高吞吐场景下有可测量的性能影响。
+移除 `msg_data[..10].to_vec()` 和 `msg_data.to_vec()` 两处不必要的堆分配，直接传 `&[u8]` 切片引用给 `HsmsHeader::decode` 和 `Secs2::decode`。
 
-**建议：** 使用 `msg_data[..10].try_into().unwrap()` 替代 header 的 Vec 分配，body 部分直接使用切片引用。
-
-### 7. Timer 和 T8 检查使用 1 秒轮询间隔，超时精度最多差 1 秒
+### 7. ~~Timer 和 T8 检查使用 1 秒轮询间隔，超时精度最多差 1 秒~~ [已修复]
 `src/hsms/session.rs:71, 74`
 
-T3/T6 超时检查和 T8 inter-character 超时检查都使用 1 秒的轮询间隔，超时最多延迟 1 秒才被检测到。
-
-注：T8 的 `last_read` 更新机制本身是正确的——`MonitoredStream` 在每次 TCP 数据到达时更新时间戳（`stream_util.rs:32-33`），不受 `Framed::decode` 返回 `Ok(None)` 的影响。
-
-**建议：** 如需更高精度，可使用 `tokio::time::Instant` + `tokio::select!` 的 per-reply 精确定时替代轮询。
+将轮询间隔从 1 秒降低至 200ms，超时精度提升 5 倍，CPU 开销可忽略。
 
 ---
 
@@ -70,17 +65,15 @@ T3/T6 超时检查和 T8 inter-character 超时检查都使用 1 秒的轮询间
 
 **建议：** 提供一个 per-session 的 system bytes 生成器，或在测试中提供重置能力。
 
-### 9. parse_sml 不验证列表长度标记
-`src/sml/parser.rs:91-92`
+### 9. ~~parse_sml 不验证列表长度标记~~ [已修复]
+`src/sml/parser.rs`
 
-`parse_list` 中 `opt(preceded(multispace1, digit1))` 解析了可选的长度标记，但返回值被丢弃，不验证长度是否与实际子项数匹配。
+`parse_list` 现在支持 `<L[n]>` 方括号语法和 `<L n` 裸数字格式，解析声明长度并与实际子项数对比，不匹配时返回 `SmlError::InvalidFormat` 错误。
 
-**建议：** 解析长度标记并与实际子项数对比，不匹配时报错。
-
-### 10. SML formatter 不输出列表长度标记
+### 10. ~~SML formatter 不输出列表长度标记~~ [已修复]
 `src/sml/formatter.rs`
 
-formatter 输出 `<L item1 item2>` 但不包含元素计数（如 `<L[2] item1 item2>`），而 parser 可以解析带可选计数的格式。formatter 和 parser 能力不对称。
+formatter 现在输出带元素计数的 `<L[n]>` 格式（如 `<L[2] <A "a"> <A "b">`），与 parser 能力对称，format→parse 往返一致。
 
 ### 11. 被注释掉的 bit_size 方法
 `src/secs2/types.rs:64-83`
