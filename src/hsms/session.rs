@@ -271,14 +271,16 @@ impl HsmsSession {
                 let sys_id = msg.header.system_bytes;
                 if let Err(e) = self.stream.send(msg).await {
                     tracing::error!("Failed to send message: {}", e);
+                    let _ = reply_tx.send(Err(HsmsError::Io(e)));
+                } else {
+                    self.t3_replies.insert(
+                        sys_id,
+                        PendingReply {
+                            tx: reply_tx,
+                            timeout_at: Instant::now() + self.config.t3,
+                        },
+                    );
                 }
-                self.t3_replies.insert(
-                    sys_id,
-                    PendingReply {
-                        tx: reply_tx,
-                        timeout_at: Instant::now() + self.config.t3,
-                    },
-                );
                 false
             }
             HsmsCommand::Shutdown { reply_tx } => {
