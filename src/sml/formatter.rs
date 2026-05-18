@@ -65,12 +65,12 @@ impl SmlFormatter {
 
             Secs2::LIST(items) => {
                 if items.is_empty() {
-                    "<L>".to_string()
+                    "<L[0]>".to_string()
                 } else {
                     let items_str: Vec<String> = items.iter()
                         .map(|item| self.format_compact(item))
                         .collect();
-                    format!("<L {}>", items_str.join(" "))
+                    format!("<L[{}] {}>", items.len(), items_str.join(" "))
                 }
             }
 
@@ -120,9 +120,9 @@ impl SmlFormatter {
 
             Secs2::LIST(items) => {
                 if items.is_empty() {
-                    "<L>".to_string()
+                    "<L[0]>".to_string()
                 } else {
-                    let mut result = "<L\n".to_string();
+                    let mut result = format!("<L[{}]\n", items.len());
                     for item in items {
                         let item_str = self.format_pretty(item, depth + 1);
                         result.push_str(&format!("{}  {}\n", indent, item_str));
@@ -207,10 +207,11 @@ mod tests {
             Secs2::LIST(vec![Secs2::U1(vec![1]), Secs2::U2(vec![200])]),
         ]);
         let result = to_sml_compact(&data);
-        assert!(result.contains("<L"));
+        assert!(result.contains("<L[2]"));
         assert!(result.contains(r#"<A "MDLN">"#));
         assert!(result.contains("<U1 1>"));
         assert!(result.contains("<U2 200>"));
+        assert!(result.contains("<L[2] <A \"MDLN\"> <L[2] <U1 1> <U2 200>>"));
     }
 
     #[test]
@@ -234,7 +235,7 @@ mod tests {
     #[test]
     fn test_format_empty_list() {
         let data = Secs2::LIST(vec![]);
-        assert_eq!(to_sml_compact(&data), "<L>");
+        assert_eq!(to_sml_compact(&data), "<L[0]>");
     }
 
     #[test]
@@ -253,7 +254,7 @@ mod tests {
         let msg = HsmsMessage::build_data_message(0, 1, 13, 0, body, true);
         let sml = to_sml_hsms(&msg);
         assert!(sml.contains("S1F13 W"));
-        assert!(sml.contains("<L"));
+        assert!(sml.contains("<L[2]"));
         assert!(sml.contains(r#"<A "MDLN">"#));
         assert!(sml.trim().ends_with("."));
     }
