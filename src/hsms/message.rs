@@ -249,14 +249,12 @@ impl Decoder for HsmsMessageCodec {
             return Err(Error::new(ErrorKind::UnexpectedEof, "消息头数据不足"));
         }
 
-        let header_bytes = msg_data[..10].to_vec();
-        let header = HsmsHeader::decode(&header_bytes)
+        let header = HsmsHeader::decode(&msg_data[..10])
             .map_err(|e| Error::new(ErrorKind::InvalidData, format!("解析HSMS头部失败: {}", e)))?;
 
         // 6. 解析 Body (SECS-II)
         msg_data.advance(10); // 跳过头部的10字节
-        let body_bytes = msg_data.to_vec();
-        let body = Secs2::decode(&body_bytes)
+        let body = Secs2::decode(&msg_data)
             .map_err(|e| {
                 Error::new(
                     ErrorKind::InvalidData,
