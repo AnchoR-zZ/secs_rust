@@ -61,25 +61,11 @@ impl HsmsCommunicator {
     }
 
     pub async fn send_message_with_reply(&self, msg: HsmsMessage) -> Result<HsmsMessage, HsmsError> {
-        // cmd_tx 发送给 Manager 如果需要回复则等待回复后返回
-        let (reply_tx, reply_rx) = oneshot::channel();
-
-        let command = HsmsCommand::SendMessageNeedReply { msg, reply_tx };
-
-        // Send the command to the manager
-        self.to_manager_cmd_tx
-            .send(command)
-            .await
-            .map_err(|_| HsmsError::ChannelClosed { op: "send_message_with_reply" })?;
-
-        // Wait for the reply
-        match reply_rx.await {
-            Ok(Ok(response)) => Ok(response), // Response received successfully
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(HsmsError::ReplyDropped {
-                message: "send_message_with_reply".to_string(),
-            }),
-        }
+        self.send_and_await_reply(
+            |reply_tx| HsmsCommand::SendMessageNeedReply { msg, reply_tx },
+            "send_message_with_reply",
+        )
+        .await
     }
 
     /// 获取当前连接状态
@@ -105,66 +91,55 @@ impl HsmsCommunicator {
     }
 
     pub async fn send_not_connect(&self) -> Result<(), HsmsError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let command = HsmsCommand::NotConnect { reply_tx };
-        self.to_manager_cmd_tx
-            .send(command)
-            .await
-            .map_err(|_| HsmsError::ChannelClosed { op: "send_not_connect" })?;
-        match reply_rx.await {
-            Ok(Ok(_)) => Ok(()), // Response received successfully
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(HsmsError::ReplyDropped {
-                message: "send_not_connect".to_string(),
-            }),
-        }
+        self.send_and_await_reply(
+            |tx| HsmsCommand::NotConnect { reply_tx: tx },
+            "send_not_connect",
+        )
+        .await
+        .map(|_| ())
     }
 
     pub async fn send_not_select(&self) -> Result<(), HsmsError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let command = HsmsCommand::NotSelect { reply_tx };
-        self.to_manager_cmd_tx
-            .send(command)
-            .await
-            .map_err(|_| HsmsError::ChannelClosed { op: "send_not_select" })?;
-        match reply_rx.await {
-            Ok(Ok(_)) => Ok(()), // Response received successfully
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(HsmsError::ReplyDropped {
-                message: "send_not_select".to_string(),
-            }),
-        }
+        self.send_and_await_reply(
+            |tx| HsmsCommand::NotSelect { reply_tx: tx },
+            "send_not_select",
+        )
+        .await
+        .map(|_| ())
     }
 
     pub async fn send_select(&self) -> Result<(), HsmsError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let command = HsmsCommand::Select { reply_tx };
-        self.to_manager_cmd_tx
-            .send(command)
-            .await
-            .map_err(|_| HsmsError::ChannelClosed { op: "send_select" })?;
-        match reply_rx.await {
-            Ok(Ok(_)) => Ok(()), // Response received successfully
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(HsmsError::ReplyDropped {
-                message: "send_select".to_string(),
-            }),
-        }
+        self.send_and_await_reply(
+            |tx| HsmsCommand::Select { reply_tx: tx },
+            "send_select",
+        )
+        .await
+        .map(|_| ())
     }
 
-    /// 发送 Shutdown 命令，停止 manager
     pub async fn shutdown(&self) -> Result<(), HsmsError> {
+        self.send_and_await_reply(
+            |tx| HsmsCommand::Shutdown { reply_tx: tx },
+            "shutdown",
+        )
+        .await
+    }
+
+    async fn send_and_await_reply<R: Send>(
+        &self,
+        make_command: impl FnOnce(oneshot::Sender<Result<R, HsmsError>>) -> HsmsCommand,
+        op: &'static str,
+    ) -> Result<R, HsmsError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let command = HsmsCommand::Shutdown { reply_tx };
+        let command = make_command(reply_tx);
         self.to_manager_cmd_tx
             .send(command)
             .await
-            .map_err(|_| HsmsError::ChannelClosed { op: "shutdown" })?;
+            .map_err(|_| HsmsError::ChannelClosed { op })?;
         match reply_rx.await {
-            Ok(Ok(_)) => Ok(()),
-            Ok(Err(e)) => Err(e),
+            Ok(result) => result,
             Err(_) => Err(HsmsError::ReplyDropped {
-                message: "shutdown".to_string(),
+                message: op.to_string(),
             }),
         }
     }

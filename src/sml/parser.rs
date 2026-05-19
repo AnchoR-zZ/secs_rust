@@ -1,6 +1,6 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while},
+    bytes::complete::{escaped_transform, tag, take_while1},
     character::complete::{char, digit1, hex_digit1, multispace0},
     combinator::{map, map_res, opt, recognize, value},
     multi::many0,
@@ -45,15 +45,19 @@ fn parse_wait_bit(input: &str) -> IResult<&str, bool, SmlError<&str>> {
     map(opt(ws(tag("W"))), |o| o.is_some()).parse(input)
 }
 
-// Parse String: "Hello"
 fn parse_string_literal(input: &str) -> IResult<&str, String, SmlError<&str>> {
-    let parser = delimited(
-        char('"'),
-        // Simple string parser, does not handle escaped quotes for now for simplicity
-        take_while(|c| c != '"'), 
-        char('"'),
+    let parser = escaped_transform(
+        take_while1(|c: char| c != '"' && c != '\\'),
+        '\\',
+        alt((
+            value("\\", tag("\\")),
+            value("\"", tag("\"")),
+            value("\n", tag("n")),
+            value("\r", tag("r")),
+            value("\t", tag("t")),
+        )),
     );
-    map(parser, |s: &str| s.to_string()).parse(input)
+    delimited(char('"'), parser, char('"')).parse(input)
 }
 
 // Parse Hex: 0x00

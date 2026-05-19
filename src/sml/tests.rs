@@ -203,3 +203,24 @@ fn test_format_parse_roundtrip() {
     let (_, msg) = parse_sml(&sml_input).unwrap();
     assert_eq!(msg.body, Some(original));
 }
+
+#[test]
+fn test_escape_roundtrip() {
+    use super::formatter::{SmlFormatter, FormatStyle};
+
+    let original = Secs2::ASCII("Hello\n\"World\"\t\r\n\\".into());
+    let formatted = SmlFormatter::new(FormatStyle::Compact).format(&original);
+    let sml_input = format!("S1F1 {} .", formatted);
+    let (_, msg) = parse_sml(&sml_input).unwrap();
+    assert_eq!(msg.body, Some(original));
+}
+
+#[test]
+fn test_parse_escaped_string() {
+    let input = r#"S1F1 <A "line1\nline2"> ."#;
+    let (_, msg) = parse_sml(input).unwrap();
+    match msg.body {
+        Some(Secs2::ASCII(s)) => assert_eq!(s, "line1\nline2"),
+        _ => panic!("Expected ASCII"),
+    }
+}
