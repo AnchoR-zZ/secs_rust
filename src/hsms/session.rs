@@ -174,7 +174,7 @@ impl HsmsSession {
             }
             MessageType::SelectRsp => {
                 let sys_id = msg.header.system_bytes;
-                if let Some(entry) = self.t3_replies.remove(&sys_id) {
+                if let Some(entry) = self.t6_replies.remove(&sys_id) {
                     if msg.header.function == 0 {
                         self.update_state(ConnectionState::Selected);
                         let _ = entry.tx.send(Ok(msg));
@@ -218,7 +218,7 @@ impl HsmsSession {
             MessageType::DeselectRsp => {
                 self.update_state(ConnectionState::NotSelected);
                 let sys_id = msg.header.system_bytes;
-                if let Some(entry) = self.t3_replies.remove(&sys_id) {
+                if let Some(entry) = self.t6_replies.remove(&sys_id) {
                     let _ = entry.tx.send(Ok(msg));
                 }
             }
@@ -317,7 +317,7 @@ impl HsmsSession {
             let _ = reply_tx.send(Err(HsmsError::Io(e)));
         } else {
             let now = Instant::now();
-            self.t3_replies.insert(
+            self.t6_replies.insert(
                 sys_id,
                 PendingReply {
                     tx: reply_tx,
@@ -346,7 +346,7 @@ impl HsmsSession {
             let _ = reply_tx.send(Err(HsmsError::Io(e)));
         } else {
             let now = Instant::now();
-            self.t3_replies.insert(
+            self.t6_replies.insert(
                 sys_id,
                 PendingReply {
                     tx: reply_tx,
@@ -381,9 +381,6 @@ impl HsmsSession {
     }
 
     async fn check_t6_timeout(&mut self) -> Result<(), HsmsError> {
-        if self.current_state != ConnectionState::Selected {
-            return Ok(());
-        }
         let now = Instant::now();
         let timed_out_keys: Vec<u32> = self
             .t6_replies

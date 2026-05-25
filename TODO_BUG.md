@@ -9,12 +9,10 @@
 
 **修复：** 发送失败时直接通过 `reply_tx` 返回 `Err(HsmsError::Io(e))`，不插入 `t3_replies`。与 `handle_select_command` / `handle_deselect_command` 模式一致。
 
-### 2. SML formatter/parser 转义字符不对齐，format→parse 往返失败
+### 2. ~~SML formatter/parser 转义字符不对齐，format→parse 往返失败~~ [已修复]
 `src/sml/formatter.rs:158-164` + `src/sml/parser.rs:49-57`
 
-formatter 正确转义了 `"`, `\n`, `\r`, `\t`, `\`，但 parser 的 `parse_string_literal` 使用 `take_while(|c| c != '"')` 不处理任何转义序列。含特殊字符的字符串在 format→parse 往返时会失败。
-
-**建议：** 在 parser 中实现完整的转义序列处理（`\\`, `\"`, `\n`, `\r`, `\t`）。
+parser 的 `parse_string_literal` 已使用 `escaped_transform` + `alt` 实现完整的转义序列处理（`\\`, `\"`, `\n`, `\r`, `\t`），与 formatter 的 `escape_string` 对齐。
 
 ### 3. ~~Secs2::EMPTY 编码为空 Vec 而非正确的空字节表示~~ [非 Bug / 保持现状]
 `src/secs2/encoder.rs:20`
@@ -35,14 +33,10 @@ formatter 正确转义了 `"`, `\n`, `\r`, `\t`, `\`，但 parser 的 `parse_str
 
 ## Important
 
-### 5. Select/Deselect 超时后不触发连接关闭，且调用方收到错误的超时类型
-`src/hsms/session.rs:318-324, 347-353`
+### 5. ~~Select/Deselect 超时后不触发连接关闭，且调用方收到错误的超时类型~~ [已修复]
+`src/hsms/session.rs`
 
-`handle_select_command` 和 `handle_deselect_command` 将 pending reply 存入 `t3_replies`（超时用 T6 时长）。`check_t6_timeout` 只检查 `t6_replies` 并在超时时触发连接关闭，但 Select/Deselect 的条目在 `t3_replies` 中不会被 `check_t6_timeout` 发现。导致：
-1. Select/Deselect 超时后，调用方收到的是 "T3" 超时错误（语义不对，应为 T6 相关）
-2. 连接不会被自动关闭，可能停留在不一致状态
-
-**建议：** 将 Select/Deselect 的 pending replies 存入 `t6_replies`，或添加独立的控制事务超时跟踪。
+将 Select/Deselect 的 pending replies 从 `t3_replies` 移至 `t6_replies`，对应响应处理同步更新。移除 `check_t6_timeout` 的 `Selected` 状态前置检查，确保 `NotSelected` 状态下的 Select 超时也能被检测。
 
 ### 6. ~~HsmsMessageCodec::decode 中不必要的 Vec 分配~~ [已修复]
 `src/hsms/message.rs:252-258`
