@@ -2,9 +2,10 @@ use crate::hsms::{ConnectionState, HsmsCommand, HsmsError};
 use crate::hsms::config::{ConnectionMode, HsmsConfig};
 use crate::hsms::message::{HsmsMessage, HsmsMessageCodec, MessageType};
 use crate::hsms::stream_util::MonitoredStream;
-use crate::util::next_system_bytes;
+use crate::util::SystemBytesGenerator;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{self, Duration, Instant, MissedTickBehavior};
@@ -31,6 +32,7 @@ pub struct HsmsSession {
     t3_replies: HashMap<u32, PendingReply>,
     t6_replies: HashMap<u32, PendingReply>,
     current_state: ConnectionState,
+    system_bytes: Arc<SystemBytesGenerator>,
 }
 
 impl HsmsSession {
@@ -39,6 +41,7 @@ impl HsmsSession {
         inbound_tx: mpsc::Sender<HsmsMessage>,
         state_tx: watch::Sender<ConnectionState>,
         config: HsmsConfig,
+        system_bytes: Arc<SystemBytesGenerator>,
     ) -> Self {
         if let Err(e) = stream.set_nodelay(true) {
             tracing::warn!("Failed to set TCP nodelay: {}", e);
@@ -55,6 +58,7 @@ impl HsmsSession {
             current_state: ConnectionState::NotSelected,
             t3_replies: HashMap::new(),
             t6_replies: HashMap::new(),
+            system_bytes,
         }
     }
 
@@ -310,7 +314,7 @@ impl HsmsSession {
             return;
         }
 
-        let sys_id = next_system_bytes();
+        let sys_id = self.system_bytes.next();
         let req = HsmsMessage::select_req(self.session_id, sys_id);
         if let Err(e) = self.stream.send(req).await {
             tracing::error!("Failed to send Select.req: {}", e);
@@ -339,7 +343,7 @@ impl HsmsSession {
             return;
         }
 
-        let req = HsmsMessage::deselect_req(self.session_id, next_system_bytes());
+        let req = HsmsMessage::deselect_req(self.session_id, self.system_bytes.next());
         let sys_id = req.header.system_bytes;
         if let Err(e) = self.stream.send(req).await {
             tracing::error!("Failed to send Deselect.req: {}", e);
@@ -368,7 +372,7 @@ impl HsmsSession {
             return;
         }
 
-        let sep = HsmsMessage::separate_req(self.session_id, next_system_bytes());
+        let sep = HsmsMessage::separate_req(self.session_id, self.system_bytes.next());
         let sep_msg = sep.clone();
         if let Err(e) = self.stream.send(sep).await {
             tracing::error!("Failed to send Separate.req: {}", e);
@@ -439,7 +443,7 @@ impl HsmsSession {
     }
 
     async fn send_linktest_req(&mut self) -> Result<(), HsmsError> {
-        let sys_id = next_system_bytes();
+        let sys_id = self.system_bytes.next();
         let req = HsmsMessage::linktest_req(sys_id);
         tracing::debug!("Sent LinktestReq: {:?}", req);
         self.stream.send(req).await.map_err(HsmsError::Io)?;
@@ -521,7 +525,7 @@ impl HsmsSession {
     }
 
     async fn send_select_req(&mut self) -> Result<(), HsmsError> {
-        let sys_id = next_system_bytes();
+        let sys_id = self.system_bytes.next();
         tracing::debug!("Sending SelectReq with system_bytes: {:?}", sys_id);
         let req = HsmsMessage::select_req(self.session_id, sys_id);
         self.stream.send(req).await.map_err(HsmsError::Io)?;

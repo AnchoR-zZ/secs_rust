@@ -2,6 +2,8 @@ use crate::hsms::config::{ConnectionMode, HsmsConfig};
 use crate::hsms::message::HsmsMessage;
 use crate::hsms::session::HsmsSession;
 use crate::hsms::{ConnectionState, HsmsCommand};
+use crate::util::SystemBytesGenerator;
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, watch};
 
@@ -17,6 +19,7 @@ pub struct HsmsManager {
     to_communicator_inbound_msg_tx: mpsc::Sender<HsmsMessage>,
     // 更新连接状态
     to_communicator_state_tx: watch::Sender<ConnectionState>,
+    system_bytes: Arc<SystemBytesGenerator>,
 }
 
 impl HsmsManager {
@@ -26,12 +29,14 @@ impl HsmsManager {
         from_communicator_cmd_rx: mpsc::Receiver<HsmsCommand>,
         to_communicator_inbound_msg_tx: mpsc::Sender<HsmsMessage>,
         to_communicator_state_tx: watch::Sender<ConnectionState>,
+        system_bytes: Arc<SystemBytesGenerator>,
     ) -> Self {
         HsmsManager {
             config,
             from_communicator_cmd_rx,
             to_communicator_inbound_msg_tx,
             to_communicator_state_tx,
+            system_bytes,
         }
     }
 
@@ -90,6 +95,7 @@ impl HsmsManager {
                 self.to_communicator_inbound_msg_tx.clone(),
                 self.to_communicator_state_tx.clone(),
                 self.config.clone(),
+                Arc::clone(&self.system_bytes),
             );
 
             let should_shutdown = session.run(&mut self.from_communicator_cmd_rx).await;

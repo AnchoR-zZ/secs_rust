@@ -149,7 +149,7 @@ async fn test_hsms_full_state_lifecycle() {
         0,
         1,
         1,
-        secs_rust::util::next_system_bytes(),
+        active_comm.next_system_bytes(),
         Secs2::ASCII("HELLO".to_string()),
     );
 
@@ -238,7 +238,7 @@ async fn test_hsms_full_state_lifecycle() {
         0,
         2,
         17,
-        secs_rust::util::next_system_bytes(),
+        active_comm.next_system_bytes(),
         Secs2::ASCII("RECONNECT_TEST".to_string()),
     );
 
@@ -286,7 +286,7 @@ async fn test_hsms_full_state_lifecycle() {
         0,
         1,
         3,
-        secs_rust::util::next_system_bytes(),
+        active_comm.next_system_bytes(),
         Secs2::ASCII("SECOND_RECONNECT".to_string()),
     );
 

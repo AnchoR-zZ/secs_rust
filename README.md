@@ -145,7 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         0,
         1,
         1,
-        secs_rust::util::next_system_bytes(),
+        active.next_system_bytes(),
         Secs2::ASCII("HELLO".to_string()),
     );
 
@@ -177,6 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - `send_message(...)`
 - `send_message_with_reply(...)`
 - `send_reply(...)`
+- `next_system_bytes()`
 - `state() / state_rx()`
 - `send_select() / send_not_select() / send_not_connect() / shutdown()`
 

@@ -1,6 +1,8 @@
 use crate::hsms::manager::HsmsManager;
 use crate::hsms::message::HsmsMessage;
 use crate::hsms::{ConnectionState, HsmsCommand, HsmsError, config::HsmsConfig};
+use crate::util::SystemBytesGenerator;
+use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch};
 
 #[derive(Clone)]
@@ -9,6 +11,7 @@ pub struct HsmsCommunicator {
     to_manager_cmd_tx: mpsc::Sender<HsmsCommand>,
     // 实时监控连接状态
     from_manager_state_rx: watch::Receiver<ConnectionState>,
+    system_bytes: Arc<SystemBytesGenerator>,
 }
 
 impl HsmsCommunicator {
@@ -20,12 +23,14 @@ impl HsmsCommunicator {
             mpsc::channel::<HsmsMessage>(32);
         let (to_communicator_state_tx, from_manager_state_rx) =
             watch::channel::<ConnectionState>(ConnectionState::NotConnected);
+        let system_bytes = Arc::new(SystemBytesGenerator::default());
 
         let manager = HsmsManager::new(
             config,
             from_communicator_cmd_rx,
             to_communicator_inbound_msg_tx,
             to_communicator_state_tx,
+            Arc::clone(&system_bytes),
         );
 
         tokio::spawn(manager.run());
@@ -33,9 +38,14 @@ impl HsmsCommunicator {
         let communicator = HsmsCommunicator {
             to_manager_cmd_tx,
             from_manager_state_rx,
+            system_bytes,
         };
 
         (communicator, from_manager_inbound_msg_rx)
+    }
+
+    pub fn next_system_bytes(&self) -> u32 {
+        self.system_bytes.next()
     }
 
     pub async fn send_reply(&self, msg: HsmsMessage) -> Result<(), HsmsError> {

@@ -14,7 +14,6 @@ use secs_rust::hsms::{
     message::{HsmsMessage, HsmsMessageCodec},
     ConnectionState,
 };
-use secs_rust::util::next_system_bytes;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
 use tokio::runtime::{Builder, Runtime};
@@ -104,18 +103,24 @@ async fn wait_hsms_state(
     );
 }
 
-fn network_request(body_size: usize) -> HsmsMessage {
+fn network_request(active: &HsmsCommunicator, body_size: usize) -> HsmsMessage {
     HsmsMessage::build_request_data_message(
         0,
         6,
         11,
-        next_system_bytes(),
+        active.next_system_bytes(),
         data_generator::binary(body_size),
     )
 }
 
 fn loopback_wire_bytes(body_size: usize) -> u64 {
-    let request = network_request(body_size);
+    let request = HsmsMessage::build_request_data_message(
+        0,
+        6,
+        11,
+        1,
+        data_generator::binary(body_size),
+    );
     (encode_message_bytes(&request).len() * 2) as u64
 }
 
@@ -294,7 +299,7 @@ fn bench_loopback_rtt(c: &mut Criterion) {
                 runtime.block_on(async {
                     for _ in 0..iters {
                         let reply = active
-                            .send_message_with_reply(network_request(size))
+                            .send_message_with_reply(network_request(&active, size))
                             .await
                             .expect("loopback RTT request should succeed");
                         black_box(reply);
@@ -311,7 +316,7 @@ fn bench_loopback_rtt(c: &mut Criterion) {
                 runtime.block_on(async {
                     for _ in 0..iters {
                         let reply = active
-                            .send_message_with_reply(network_request(size))
+                            .send_message_with_reply(network_request(&active, size))
                             .await
                             .expect("loopback RTT request should succeed");
                         black_box(reply);
@@ -348,7 +353,7 @@ fn bench_loopback_batch_throughput(c: &mut Criterion) {
                     runtime.block_on(async {
                         for _ in 0..iters {
                             let futures: Vec<_> = (0..batch_size)
-                                .map(|_| active.send_message_with_reply(network_request(size)))
+                                .map(|_| active.send_message_with_reply(network_request(&active, size)))
                                 .collect();
                             let replies = join_all(futures).await;
                             for reply in replies {
@@ -367,7 +372,7 @@ fn bench_loopback_batch_throughput(c: &mut Criterion) {
                     runtime.block_on(async {
                         for _ in 0..iters {
                             let futures: Vec<_> = (0..batch_size)
-                                .map(|_| active.send_message_with_reply(network_request(size)))
+                                .map(|_| active.send_message_with_reply(network_request(&active, size)))
                                 .collect();
                             let replies = join_all(futures).await;
                             for reply in replies {
@@ -414,7 +419,7 @@ fn bench_loopback_pipelined_throughput(c: &mut Criterion) {
 
                             // Pre-fill the concurrency window
                             for _ in 0..concurrency {
-                                in_flight.push(active.send_message_with_reply(network_request(size)));
+                                in_flight.push(active.send_message_with_reply(network_request(&active, size)));
                             }
 
                             // Sustain the window: each completion triggers a new request
@@ -426,7 +431,7 @@ fn bench_loopback_pipelined_throughput(c: &mut Criterion) {
                                     .expect("pipelined request should succeed")
                                     .expect("pipelined request should succeed");
                                 black_box(reply);
-                                in_flight.push(active.send_message_with_reply(network_request(size)));
+                                in_flight.push(active.send_message_with_reply(network_request(&active, size)));
                                 sent += 1;
                             }
 
@@ -450,7 +455,7 @@ fn bench_loopback_pipelined_throughput(c: &mut Criterion) {
 
                             // Pre-fill the concurrency window
                             for _ in 0..concurrency {
-                                in_flight.push(active.send_message_with_reply(network_request(size)));
+                                in_flight.push(active.send_message_with_reply(network_request(&active, size)));
                             }
 
                             // Sustain the window: each completion triggers a new request
@@ -462,7 +467,7 @@ fn bench_loopback_pipelined_throughput(c: &mut Criterion) {
                                     .expect("pipelined request should succeed")
                                     .expect("pipelined request should succeed");
                                 black_box(reply);
-                                in_flight.push(active.send_message_with_reply(network_request(size)));
+                                in_flight.push(active.send_message_with_reply(network_request(&active, size)));
                                 sent += 1;
                             }
 
@@ -513,7 +518,7 @@ fn bench_loopback_multi_pair_throughput(c: &mut Criterion) {
                         let replies = join_all(
                             actives
                                 .iter()
-                                .map(|active| active.send_message_with_reply(network_request(body_size))),
+                                .map(|active| active.send_message_with_reply(network_request(active, body_size))),
                         )
                         .await;
 
@@ -535,7 +540,7 @@ fn bench_loopback_multi_pair_throughput(c: &mut Criterion) {
                         let replies = join_all(
                             actives
                                 .iter()
-                                .map(|active| active.send_message_with_reply(network_request(body_size))),
+                                .map(|active| active.send_message_with_reply(network_request(active, body_size))),
                         )
                         .await;
 
