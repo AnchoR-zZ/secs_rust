@@ -1,4 +1,5 @@
 use crate::hsms::message::HsmsMessage;
+use crate::secs2::Secs2;
 use serde::Serialize;
 use std::time::Duration;
 use thiserror::Error;
@@ -50,6 +51,19 @@ pub enum HsmsCommand {
 
     SendReply {
         msg: HsmsMessage,
+    },
+
+    SendData {
+        stream: u8,
+        function: u8,
+        body: Secs2,
+    },
+
+    SendDataNeedReply {
+        stream: u8,
+        function: u8,
+        body: Secs2,
+        reply_tx: oneshot::Sender<Result<HsmsMessage, HsmsError>>,
     },
 
     Select {

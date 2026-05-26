@@ -1,6 +1,7 @@
 use crate::hsms::manager::HsmsManager;
 use crate::hsms::message::HsmsMessage;
 use crate::hsms::{ConnectionState, HsmsCommand, HsmsError, config::HsmsConfig};
+use crate::secs2::Secs2;
 use crate::util::SystemBytesGenerator;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -78,6 +79,42 @@ impl HsmsCommunicator {
         .await
     }
 
+    pub async fn send_data(
+        &self,
+        stream: u8,
+        function: u8,
+        body: Secs2,
+    ) -> Result<(), HsmsError> {
+        let command = HsmsCommand::SendData {
+            stream,
+            function,
+            body,
+        };
+
+        self.to_manager_cmd_tx
+            .send(command)
+            .await
+            .map_err(|_| HsmsError::ChannelClosed { op: "send_data" })
+    }
+
+    pub async fn send_data_with_reply(
+        &self,
+        stream: u8,
+        function: u8,
+        body: Secs2,
+    ) -> Result<HsmsMessage, HsmsError> {
+        self.send_and_await_reply(
+            |reply_tx| HsmsCommand::SendDataNeedReply {
+                stream,
+                function,
+                body,
+                reply_tx,
+            },
+            "send_data_with_reply",
+        )
+        .await
+    }
+
     /// 获取当前连接状态
     ///
     /// 返回 HSMS 层的连接状态（NotConnected / NotSelected / Selected）。
@@ -151,6 +188,41 @@ impl HsmsCommunicator {
             Err(_) => Err(HsmsError::ReplyDropped {
                 message: op.to_string(),
             }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secs2::Secs2;
+
+    #[tokio::test]
+    async fn send_data_sends_command_without_system_bytes() {
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let (_state_tx, state_rx) = watch::channel(ConnectionState::NotConnected);
+        let communicator = HsmsCommunicator {
+            to_manager_cmd_tx: cmd_tx,
+            from_manager_state_rx: state_rx,
+            system_bytes: Arc::new(SystemBytesGenerator::default()),
+        };
+
+        communicator
+            .send_data(1, 15, Secs2::ASCII("offline".to_string()))
+            .await
+            .unwrap();
+
+        match cmd_rx.recv().await.unwrap() {
+            HsmsCommand::SendData {
+                stream,
+                function,
+                body,
+            } => {
+                assert_eq!(stream, 1);
+                assert_eq!(function, 15);
+                assert_eq!(body, Secs2::ASCII("offline".to_string()));
+            }
+            other => panic!("unexpected command: {:?}", other),
         }
     }
 }

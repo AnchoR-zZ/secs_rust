@@ -2,6 +2,7 @@ use crate::hsms::{ConnectionState, HsmsCommand, HsmsError};
 use crate::hsms::config::{ConnectionMode, HsmsConfig};
 use crate::hsms::message::{HsmsMessage, HsmsMessageCodec, MessageType};
 use crate::hsms::stream_util::MonitoredStream;
+use crate::secs2::Secs2;
 use crate::util::SystemBytesGenerator;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -14,6 +15,24 @@ use tokio_util::codec::Framed;
 struct PendingReply {
     tx: oneshot::Sender<Result<HsmsMessage, HsmsError>>,
     timeout_at: Instant,
+}
+
+fn build_outbound_data_message(
+    session_id: u16,
+    system_bytes: &SystemBytesGenerator,
+    stream: u8,
+    function: u8,
+    body: Secs2,
+    w_bit: bool,
+) -> HsmsMessage {
+    HsmsMessage::build_data_message(
+        session_id,
+        stream,
+        function,
+        system_bytes.next(),
+        body,
+        w_bit,
+    )
 }
 
 pub struct HsmsSession {
@@ -262,10 +281,58 @@ impl HsmsSession {
                 }
                 false
             }
+            HsmsCommand::SendData {
+                stream,
+                function,
+                body,
+            } => {
+                let msg = build_outbound_data_message(
+                    self.session_id,
+                    &self.system_bytes,
+                    stream,
+                    function,
+                    body,
+                    false,
+                );
+                if let Err(e) = self.stream.send(msg).await {
+                    tracing::error!("Failed to send data message: {}", e);
+                }
+                false
+            }
             HsmsCommand::SendMessage { mut msg } => {
                 self.stamp_session_id(&mut msg);
                 if let Err(e) = self.stream.send(msg).await {
                     tracing::error!("Failed to send message: {}", e);
+                }
+                false
+            }
+            HsmsCommand::SendDataNeedReply {
+                stream,
+                function,
+                body,
+                reply_tx,
+            } => {
+                let msg = build_outbound_data_message(
+                    self.session_id,
+                    &self.system_bytes,
+                    stream,
+                    function,
+                    body,
+                    true,
+                );
+                let sys_id = msg.header.system_bytes;
+                tracing::debug!("Sending data message with reply: {:?}", msg);
+                if let Err(e) = self.stream.send(msg).await {
+                    tracing::error!("Failed to send data message: {}", e);
+                    let _ = reply_tx.send(Err(HsmsError::Io(e)));
+                } else {
+                    self.t3_replies.insert(
+                        sys_id,
+                        PendingReply {
+                            tx: reply_tx,
+                            timeout_at: Instant::now() + self.config.t3,
+                        },
+                    );
                 }
                 false
             }
@@ -585,5 +652,47 @@ impl HsmsSession {
             self.current_state = new_state;
             let _ = self.state_tx.send(new_state);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::secs2::Secs2;
+
+    #[test]
+    fn build_outbound_data_message_allocates_system_bytes_in_hsms_layer() {
+        let generator = SystemBytesGenerator::default();
+
+        let first = build_outbound_data_message(
+            0x1234,
+            &generator,
+            1,
+            13,
+            Secs2::ASCII("first".to_string()),
+            true,
+        );
+        let second = build_outbound_data_message(
+            0x1234,
+            &generator,
+            1,
+            15,
+            Secs2::EMPTY,
+            false,
+        );
+
+        assert_eq!(first.header.session_id, 0x1234);
+        assert_eq!(first.header.stream, 1);
+        assert_eq!(first.header.function, 13);
+        assert_eq!(first.header.system_bytes, 1);
+        assert!(first.header.w_bit);
+        assert_eq!(first.body, Secs2::ASCII("first".to_string()));
+
+        assert_eq!(second.header.session_id, 0x1234);
+        assert_eq!(second.header.stream, 1);
+        assert_eq!(second.header.function, 15);
+        assert_eq!(second.header.system_bytes, 2);
+        assert!(!second.header.w_bit);
+        assert_eq!(second.body, Secs2::EMPTY);
     }
 }
