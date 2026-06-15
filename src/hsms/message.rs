@@ -215,7 +215,49 @@ impl HsmsMessage {
     }
 }
 
-pub struct HsmsMessageCodec;
+/// 单条 HSMS 消息的默认长度上限（含 10 字节 header，不含 4 字节 length 前缀）。
+/// 16 MiB 远超任何真实 SECS-II 消息（单 item 的 length 字段本身最多 3 字节即 16 MiB），
+/// 用于防御 corrupted length 前缀（对端 bug / 线缆噪声 / fuzz）导致的内存放大。
+const DEFAULT_MAX_MSG_LEN: usize = 1 << 24; // 16 MiB
+
+/// HSMS 消息编解码器。
+///
+/// `max_msg_len` 为单条消息（header + body）的字节上限；为 0 时使用内部默认 16 MiB。
+/// 超过上限的 length 前缀会在首次 decode 即被拒绝（返回 `InvalidData`），
+/// 避免读缓冲随对端慢速灌入的数据单调增长直至 OOM。
+pub struct HsmsMessageCodec {
+    max_msg_len: usize,
+}
+
+impl Default for HsmsMessageCodec {
+    fn default() -> Self {
+        Self {
+            max_msg_len: DEFAULT_MAX_MSG_LEN,
+        }
+    }
+}
+
+impl HsmsMessageCodec {
+    /// 构造指定上限的 codec；`max_msg_len` 为 0 时使用默认 16 MiB。
+    pub fn new(max_msg_len: usize) -> Self {
+        Self {
+            max_msg_len: if max_msg_len == 0 {
+                DEFAULT_MAX_MSG_LEN
+            } else {
+                max_msg_len
+            },
+        }
+    }
+
+    #[inline]
+    fn effective_max(&self) -> usize {
+        if self.max_msg_len == 0 {
+            DEFAULT_MAX_MSG_LEN
+        } else {
+            self.max_msg_len
+        }
+    }
+}
 
 impl Decoder for HsmsMessageCodec {
     type Item = HsmsMessage;
@@ -232,6 +274,15 @@ impl Decoder for HsmsMessageCodec {
             | ((src[1] as u32) << 16)
             | ((src[2] as u32) << 8)
             | (src[3] as u32);
+
+        // 2.1 长度上限校验：超限立刻拒绝，避免缓冲随慢速灌入数据无限增长
+        let max = self.effective_max();
+        if msg_len as usize > max {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!("消息长度 {} 超过上限 {}", msg_len, max),
+            ));
+        }
 
         // 3. 检查 src 剩余长度是否 >= msg_len
         if src.len() < 4 + msg_len as usize {
@@ -448,7 +499,7 @@ mod tests {
         ];
 
         let mut src = BytesMut::from(&binary_data[..]);
-        let mut codec = HsmsMessageCodec;
+        let mut codec = HsmsMessageCodec::default();
 
         let result = codec.decode(&mut src);
 
@@ -488,7 +539,7 @@ mod tests {
         };
 
         let mut dst = BytesMut::new();
-        let mut codec = HsmsMessageCodec;
+        let mut codec = HsmsMessageCodec::default();
 
         let result = codec.encode(original_message.clone(), &mut dst);
         assert!(result.is_ok());
@@ -527,7 +578,7 @@ mod tests {
 
         // 编码
         let mut buffer = BytesMut::new();
-        let mut codec = HsmsMessageCodec;
+        let mut codec = HsmsMessageCodec::default();
         codec.encode(original_message.clone(), &mut buffer).unwrap();
 
         // 解码
@@ -584,7 +635,7 @@ mod tests {
         };
 
         let mut dst = BytesMut::new();
-        let mut codec = HsmsMessageCodec;
+        let mut codec = HsmsMessageCodec::default();
         codec.encode(message, &mut dst).unwrap();
 
         let expected_bytes = [
@@ -600,7 +651,7 @@ mod tests {
         let incomplete_data = [0x00, 0x00]; // 只有2字节，不足4字节长度字段
 
         let mut src = BytesMut::from(&incomplete_data[..]);
-        let mut codec = HsmsMessageCodec;
+        let mut codec = HsmsMessageCodec::default();
 
         let result = codec.decode(&mut src);
         assert!(result.is_ok());
@@ -616,10 +667,62 @@ mod tests {
         ];
 
         let mut src = BytesMut::from(&partial_data[..]);
-        let mut codec = HsmsMessageCodec;
+        let mut codec = HsmsMessageCodec::default();
 
         let result = codec.decode(&mut src);
         assert!(result.is_ok());
         assert!(result.unwrap().is_none()); // 应该返回None，表示消息不完整
+    }
+
+    #[test]
+    fn test_decode_rejects_oversized_length() {
+        // 长度前缀声称 0xFFFFFFFF (~4GB)，但实际只发了 4 字节前缀 + 少量 body。
+        // 期望：首次 decode 立即返回 InvalidData，而非 Ok(None) 慢慢攒数据到 OOM。
+        let oversized_data = [
+            0xFF, 0xFF, 0xFF, 0xFF, // 伪造的长度前缀
+            0x00, 0x00, 0x01, 0x01, // 少量后续字节（远不足以填满声称的长度）
+        ];
+
+        let mut src = BytesMut::from(&oversized_data[..]);
+        let mut codec = HsmsMessageCodec::default();
+
+        let result = codec.decode(&mut src);
+        assert!(result.is_err(), "超限长度前缀应被拒绝");
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_decode_respects_configured_max_msg_len() {
+        // 配置一个很小的上限 (64)，构造一条合法但长度刚好超限的消息前缀。
+        // 0x00 0x00 0x00 0x41 = 65，刚好超过上限 64。
+        let data = [0x00, 0x00, 0x00, 0x41];
+
+        let mut src = BytesMut::from(&data[..]);
+        let mut codec = HsmsMessageCodec::new(64);
+
+        let result = codec.decode(&mut src);
+        assert!(result.is_err(), "超过自定义上限的长度应被拒绝");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn test_decode_allows_message_within_max_msg_len() {
+        // 长度 17，在默认上限内，且数据完整 —— 应返回 Ok(None) 表示数据不完整，
+        // 而非 Err（验证上限校验没有误伤合法长度）。
+        let data = [
+            0x00, 0x00, 0x00, 0x11, // 长度 17
+            0x00, 0x00, 0x01, 0x01, // 仅 4 字节，不够 17
+        ];
+
+        let mut src = BytesMut::from(&data[..]);
+        let mut codec = HsmsMessageCodec::new(64); // 上限 64 > 17，合法
+
+        let result = codec.decode(&mut src);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // 数据不完整，但长度合法
     }
 }

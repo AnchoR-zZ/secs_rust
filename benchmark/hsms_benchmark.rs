@@ -78,6 +78,7 @@ fn loopback_config(port: u16, mode: ConnectionMode) -> HsmsConfig {
         t7: Duration::from_secs(2),
         t8: Duration::from_secs(2),
         linktest: Duration::from_secs(30),
+        max_msg_len: 0,
     }
 }
 
@@ -171,7 +172,7 @@ async fn shutdown_loopback_pair(fixture: LoopbackFixture) {
 }
 
 fn encode_message_bytes(message: &HsmsMessage) -> Vec<u8> {
-    let mut codec = HsmsMessageCodec;
+    let mut codec = HsmsMessageCodec::default();
     let mut buffer = BytesMut::new();
     codec
         .encode(message.clone(), &mut buffer)
@@ -185,7 +186,7 @@ fn bench_hsms_case(group: &mut BenchmarkGroup<'_, WallTime>, label: &str, messag
     group.throughput(Throughput::Bytes(encoded.len() as u64));
     group.bench_function(BenchmarkId::new("encode_bytes", label), |b| {
         b.iter(|| {
-            let mut codec = HsmsMessageCodec;
+            let mut codec = HsmsMessageCodec::default();
             let mut buffer = BytesMut::with_capacity(encoded.len());
             codec
                 .encode(black_box(message.clone()), &mut buffer)
@@ -197,7 +198,7 @@ fn bench_hsms_case(group: &mut BenchmarkGroup<'_, WallTime>, label: &str, messag
     group.throughput(Throughput::Elements(1));
     group.bench_function(BenchmarkId::new("encode_messages", label), |b| {
         b.iter(|| {
-            let mut codec = HsmsMessageCodec;
+            let mut codec = HsmsMessageCodec::default();
             let mut buffer = BytesMut::with_capacity(encoded.len());
             codec
                 .encode(black_box(message.clone()), &mut buffer)
@@ -209,7 +210,7 @@ fn bench_hsms_case(group: &mut BenchmarkGroup<'_, WallTime>, label: &str, messag
     group.throughput(Throughput::Bytes(encoded.len() as u64));
     group.bench_function(BenchmarkId::new("decode_bytes", label), |b| {
         b.iter(|| {
-            let mut codec = HsmsMessageCodec;
+            let mut codec = HsmsMessageCodec::default();
             let mut source = BytesMut::from(black_box(encoded.as_slice()));
             let decoded = codec
                 .decode(&mut source)
@@ -222,7 +223,7 @@ fn bench_hsms_case(group: &mut BenchmarkGroup<'_, WallTime>, label: &str, messag
     group.throughput(Throughput::Elements(1));
     group.bench_function(BenchmarkId::new("decode_messages", label), |b| {
         b.iter(|| {
-            let mut codec = HsmsMessageCodec;
+            let mut codec = HsmsMessageCodec::default();
             let mut source = BytesMut::from(black_box(encoded.as_slice()));
             let decoded = codec
                 .decode(&mut source)

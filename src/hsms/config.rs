@@ -13,6 +13,9 @@ pub struct HsmsConfig {
     pub t7: Duration,              // Not Selected Timeout (TCP建立后多久没收到Select则断开)
     pub t8: Duration,              // Inter-character Timeout (通常由TCP栈处理，应用层可忽略)
     pub linktest: Duration,
+    /// 单条 HSMS 消息最大字节数（含 10 字节 header，不含 4 字节 length 前缀）。
+    /// 为 0 时 codec 使用内部默认 16 MiB。用于防御 corrupted length 前缀导致的内存放大。
+    pub max_msg_len: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,6 +38,7 @@ impl Default for HsmsConfig {
             t7: Duration::from_secs(10),
             t8: Duration::from_secs(5),
             linktest: Duration::from_secs(30),
+            max_msg_len: 0, // 0 = codec 用内部默认 16 MiB
         }
     }
 }

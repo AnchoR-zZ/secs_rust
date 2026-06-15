@@ -66,7 +66,10 @@ impl HsmsSession {
             tracing::warn!("Failed to set TCP nodelay: {}", e);
         }
         let monitored_stream = MonitoredStream::new(stream);
-        let framed_stream = Framed::new(monitored_stream, HsmsMessageCodec);
+        let framed_stream = Framed::new(
+            monitored_stream,
+            HsmsMessageCodec::new(config.max_msg_len),
+        );
         let _ = state_tx.send_replace(ConnectionState::NotSelected);
         Self {
             session_id: config.session_id,
