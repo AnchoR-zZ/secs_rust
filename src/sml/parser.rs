@@ -13,6 +13,11 @@ use std::str::FromStr;
 use crate::secs2::Secs2;
 use super::error::SmlError;
 
+/// LIST 嵌套深度上限。用于防御递归下降解析器的栈溢出。
+/// GEM 标准中最复杂的消息嵌套深度极少超过 5–6 层，64 层对所有合法用途宽松 10 倍以上，
+/// 又能挡住任何恶意/损坏的深度嵌套导致的栈溢出。与 secs2 二进制解析器保持一致。
+const MAX_SML_DEPTH: u32 = 64;
+
 #[derive(Debug, PartialEq, Clone)]
 pub struct SmlMessage {
     pub stream: u8,
@@ -90,7 +95,15 @@ fn parse_number<T: FromStr>(input: &str) -> IResult<&str, T, SmlError<&str>> {
 
 // --- Item Parsers ---
 
-fn parse_list(input: &str) -> IResult<&str, Secs2, SmlError<&str>> {
+fn parse_list(input: &str, depth: u32) -> IResult<&str, Secs2, SmlError<&str>> {
+    // 深度守卫：递归进入 list 时检查，防止过深嵌套溢出栈。
+    if depth > MAX_SML_DEPTH {
+        return Err(nom::Err::Failure(SmlError::InvalidFormat(format!(
+            "LIST nesting too deep: {} (max {})",
+            depth, MAX_SML_DEPTH
+        ))));
+    }
+
     let (input, _) = tag("<L").parse(input)?;
     let (input, declared_len) = opt(preceded(
         multispace0,
@@ -99,19 +112,36 @@ fn parse_list(input: &str) -> IResult<&str, Secs2, SmlError<&str>> {
             map_res(digit1, |s: &str| s.parse::<usize>()),
         )),
     )).parse(input)?;
-    let (input, items) = many0(ws(parse_item)).parse(input)?;
-    let (input, _) = char('>').parse(input)?;
 
-    if let Some(expected) = declared_len {
-        if items.len() != expected {
-            return Err(nom::Err::Failure(SmlError::InvalidFormat(format!(
-                "List length marker says {} but found {} items",
-                expected, items.len()
-            ))));
+    // 手动循环解析子元素（原 many0(ws(parse_item))），并在每次递归时 depth + 1。
+    // 遇到 '>' 表示 list 结束；其他情况继续解析子 item。
+    let mut input = input;
+    let mut items = Vec::new();
+    loop {
+        let (rest, _) = multispace0.parse(input)?;
+        // 检查是否到达 list 结束符 '>'
+        match char::<_, SmlError<&str>>('>').parse(rest) {
+            Ok((after_close, _)) => {
+                if let Some(expected) = declared_len {
+                    if items.len() != expected {
+                        return Err(nom::Err::Failure(SmlError::InvalidFormat(format!(
+                            "List length marker says {} but found {} items",
+                            expected,
+                            items.len()
+                        ))));
+                    }
+                }
+                return Ok((after_close, Secs2::LIST(items)));
+            }
+            Err(nom::Err::Error(_)) => {
+                // 不是 '>', 继续当作子 item 解析
+            }
+            Err(e) => return Err(e), // Failure / Incomplete 直接上抛
         }
+        let (rest, item) = parse_item(rest, depth + 1)?;
+        items.push(item);
+        input = rest;
     }
-
-    Ok((input, Secs2::LIST(items)))
 }
 
 fn parse_ascii(input: &str) -> IResult<&str, Secs2, SmlError<&str>> {
@@ -158,9 +188,21 @@ impl_numeric_parser!(parse_i8, "<I8", i64, Secs2::I8);
 impl_numeric_parser!(parse_f4, "<F4", f32, Secs2::D4);
 impl_numeric_parser!(parse_f8, "<F8", f64, Secs2::D8);
 
-fn parse_item(input: &str) -> IResult<&str, Secs2, SmlError<&str>> {
+// 构造一个把 depth 绑定到 parse_list 的解析器闭包。
+// 用独立函数返回闭包是为了强制 HRTB（对任意输入生命周期成立），否则 alt 内
+// 闭包的生命周期无法统一。nom 的 alt 需要每个分支都是 FnMut(&'a str) -> IResult<&'a str, _>。
+fn list_parser_with_depth(depth: u32) -> impl FnMut(&str) -> IResult<&str, Secs2, SmlError<&str>> {
+    move |i: &str| parse_list(i, depth)
+}
+
+// 顶层 item 解析器（depth = 0）。独立函数强制 HRTB，使闭包可用于 nom 组合子。
+fn item_parser_root() -> impl FnMut(&str) -> IResult<&str, Secs2, SmlError<&str>> {
+    move |i: &str| parse_item(i, 0)
+}
+
+fn parse_item(input: &str, depth: u32) -> IResult<&str, Secs2, SmlError<&str>> {
     alt((
-        parse_list,
+        list_parser_with_depth(depth),
         parse_ascii,
         parse_binary,
         parse_boolean,
@@ -178,7 +220,7 @@ pub fn parse_sml(input: &str) -> IResult<&str, SmlMessage, SmlError<&str>> {
     let (input, wait_bit) = parse_wait_bit(input)?;
     
     // Body is optional (e.g. S1F1 W .)
-    let (input, body) = opt(ws(parse_item)).parse(input)?;
+    let (input, body) = opt(ws(item_parser_root())).parse(input)?;
     
     // Optional trailing dot
     let (input, _) = opt(ws(char('.'))).parse(input)?;

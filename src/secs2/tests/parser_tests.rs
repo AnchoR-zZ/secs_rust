@@ -386,3 +386,68 @@ fn test_empty_roundtrip() {
         other => panic!("Expected EMPTY, got: {:?}", other),
     }
 }
+
+#[test]
+fn test_decode_nested_list() {
+    // 构造 depth-3 的合法嵌套 LIST：<L <L <L "X"> > >，验证深度守卫不误伤合法嵌套。
+    //   外层 LIST(1): 0x01 0x01
+    //     中层 LIST(1): 0x01 0x01
+    //       内层 LIST(1): 0x01 0x01
+    //         ASCII "X": 0x41 0x01 0x58
+    let bytes = [
+        0x01, 0x01, // 外层 LIST, 1 个元素
+        0x01, 0x01, // 中层 LIST, 1 个元素
+        0x01, 0x01, // 内层 LIST, 1 个元素
+        0x41, 0x01, 0x58, // ASCII "X"
+    ];
+
+    let result = Secs2::decode(&bytes).unwrap().unwrap();
+    // 逐层下钻验证结构
+    match &result {
+        Secs2::LIST(outer) => {
+            assert_eq!(outer.len(), 1);
+            match &outer[0] {
+                Secs2::LIST(mid) => {
+                    assert_eq!(mid.len(), 1);
+                    match &mid[0] {
+                        Secs2::LIST(inner) => {
+                            assert_eq!(inner.len(), 1);
+                            match &inner[0] {
+                                Secs2::ASCII(s) => assert_eq!(s, "X"),
+                                _ => panic!("Expected ASCII leaf"),
+                            }
+                        }
+                        _ => panic!("Expected inner LIST"),
+                    }
+                }
+                _ => panic!("Expected middle LIST"),
+            }
+        }
+        _ => panic!("Expected outer LIST"),
+    }
+}
+
+#[test]
+fn test_decode_rejects_excessive_nesting() {
+    // 构造超深链式嵌套：N 层 LIST(1)，每层 2 字节 [0x01, 0x01]，
+    // 最后接一个空 LIST [0x01, 0x00] 作为叶子。总深度 = N+1，超过 MAX_PARSE_DEPTH(64)。
+    use crate::secs2::Secs2Error;
+
+    let max_depth = 64;
+    let nesting = (max_depth + 1) as usize;
+    let mut bytes = Vec::with_capacity(nesting * 2 + 2);
+    for _ in 0..nesting {
+        bytes.extend_from_slice(&[0x01, 0x01]); // LIST, 1 个元素
+    }
+    bytes.extend_from_slice(&[0x01, 0x00]); // 叶子空 LIST，闭合嵌套
+
+    let result = Secs2::decode(&bytes);
+    assert!(result.is_err(), "超深嵌套应被拒绝");
+    match result.unwrap_err() {
+        Secs2Error::NestingTooDeep { depth, max } => {
+            assert_eq!(max, max_depth);
+            assert!(depth > max_depth);
+        }
+        other => panic!("Expected NestingTooDeep, got: {:?}", other),
+    }
+}

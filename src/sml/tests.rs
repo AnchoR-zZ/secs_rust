@@ -224,3 +224,26 @@ fn test_parse_escaped_string() {
         _ => panic!("Expected ASCII"),
     }
 }
+
+#[test]
+fn test_parse_excessive_nesting_rejected() {
+    // 构造超深嵌套：<L <L <L ... <L> > > >，深度超过 MAX_SML_DEPTH(64)。
+    // 预期：parse_sml 返回 Err（nom::Err::Failure），而非栈溢出崩溃。
+    let depth = 80; // 远超上限 64
+    let mut input = String::from("S1F1 ");
+    for _ in 0..depth {
+        input.push_str("<L ");
+    }
+    input.push_str("<A \"leaf\">"); // 叶子
+    for _ in 0..depth {
+        input.push_str(" >");
+    }
+    input.push_str(" .");
+
+    let result = parse_sml(&input);
+    assert!(result.is_err(), "超深嵌套的 SML 应被拒绝，不应栈溢出");
+    match result.unwrap_err() {
+        nom::Err::Failure(_) => {} // 期望的失败类型
+        other => panic!("Expected nom::Err::Failure, got: {:?}", other),
+    }
+}

@@ -34,6 +34,8 @@ pub enum Secs2Error {
     LengthTooLarge { length: usize },
     #[error("SECS2_E2008 invalid data: {message}")]
     InvalidData { message: String },
+    #[error("SECS2_E2009 nesting too deep: {depth} (max {max})")]
+    NestingTooDeep { depth: u32, max: u32 },
 }
 
 // 导出主要类型和函数

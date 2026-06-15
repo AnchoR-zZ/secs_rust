@@ -1,14 +1,21 @@
 use crate::secs2::{Secs2Error, types::{FormatCode, Secs2}};
 
+/// LIST 嵌套深度上限。用于防御递归下降解析器的栈溢出。
+/// GEM 标准中最复杂的消息（如 S6F11 事件报告）嵌套深度极少超过 5–6 层，
+/// 64 层对所有合法用途宽松 10 倍以上，又能挡住任何恶意/损坏的深度嵌套导致的栈溢出。
+const MAX_PARSE_DEPTH: u32 = 64;
+
 /// decode
 impl Secs2 {
     pub fn decode(bytes: &[u8]) -> Result<Option<Secs2>, Secs2Error> {
-        let (result, _) = Self::parse(bytes)?;
+        let (result, _) = Self::parse(bytes, 0)?;
         Ok(result)
     }
 
-    /// 输入bytes，返回解析后的Secs2对象和已使用的字节数
-    fn parse(bytes: &[u8]) -> Result<(Option<Secs2>, usize), Secs2Error> {
+    /// 输入bytes，返回解析后的Secs2对象和已使用的字节数。
+    ///
+    /// `depth` 为当前 LIST 嵌套深度（顶层为 0），用于防止递归过深导致栈溢出。
+    fn parse(bytes: &[u8], depth: u32) -> Result<(Option<Secs2>, usize), Secs2Error> {
         if bytes.is_empty() {
             return Ok((Some(Secs2::EMPTY), 0));
         }
@@ -20,12 +27,20 @@ impl Secs2 {
             });
         }
 
+        // 深度守卫：在解析任何 item 前检查，防止递归过深溢出栈。
+        if depth > MAX_PARSE_DEPTH {
+            return Err(Secs2Error::NestingTooDeep {
+                depth,
+                max: MAX_PARSE_DEPTH,
+            });
+        }
+
         // 解析头部
         let (format_code, length_bytes_count) = Self::parse_head(bytes[0])?;
 
         // 解析数据部分
         let (result, bytes_offset) = match format_code {
-            FormatCode::List => Self::parse_list(&bytes[1..], length_bytes_count)?,
+            FormatCode::List => Self::parse_list(&bytes[1..], length_bytes_count, depth)?,
             FormatCode::Binary => Self::parse_binary(&bytes[1..], length_bytes_count)?,
             FormatCode::Boolean => Self::parse_boolean(&bytes[1..], length_bytes_count)?,
             FormatCode::Ascii => Self::parse_ascii(&bytes[1..], length_bytes_count)?,
@@ -124,9 +139,12 @@ impl Secs2 {
     }
 
     /// 解析LIST类型
+    ///
+    /// `depth` 为当前嵌套深度；递归解析每个元素时以 `depth + 1` 进入，确保深度守卫生效。
     fn parse_list(
         bytes: &[u8],
         length_bytes_count: u8,
+        depth: u32,
     ) -> Result<(Secs2, usize), Secs2Error> {
         // 解析元素数量
         let element_count = Self::parse_item_long(bytes, length_bytes_count)?;
@@ -146,7 +164,7 @@ impl Secs2 {
                 });
             }
 
-            let (item, bytes_used) = Self::parse(&bytes[current_pos..])?;
+            let (item, bytes_used) = Self::parse(&bytes[current_pos..], depth + 1)?;
             let item = item.ok_or_else(|| Secs2Error::InvalidData {
                 message: "解析LIST元素失败".to_string(),
             })?;
