@@ -419,6 +419,9 @@ impl HsmsSession {
             tracing::error!("Failed to send Deselect.req: {}", e);
             let _ = reply_tx.send(Err(HsmsError::Io(e)));
         } else {
+            // 注意：此处不提前转 NotSelected。
+            // 依据 SEMI E37，Selected → NotSelected 只能在收到 DeselectRsp 时发生。
+            // 正常路径见 DeselectRsp 分支；超时路径由 check_t6_timeout 转 NotConnected。
             let now = Instant::now();
             self.t6_replies.insert(
                 sys_id,
@@ -427,7 +430,6 @@ impl HsmsSession {
                     timeout_at: now + self.config.t6,
                 },
             );
-            self.update_state(ConnectionState::NotSelected);
         }
     }
 
