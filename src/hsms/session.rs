@@ -13,7 +13,10 @@ use tokio::time::{self, Duration, Instant, MissedTickBehavior};
 use tokio_util::codec::Framed;
 
 struct PendingReply {
-    tx: oneshot::Sender<Result<HsmsMessage, HsmsError>>,
+    /// 回复通道。控制事务（Select/Deselect）为 `Some`；
+    /// Linktest 为 `None`——它是 fire-and-forget 的健康探针，无需把响应回传上层，
+    /// 但仍需登记进 t6_replies 以便 T6 超时检测。
+    tx: Option<oneshot::Sender<Result<HsmsMessage, HsmsError>>>,
     timeout_at: Instant,
 }
 
@@ -161,8 +164,10 @@ impl HsmsSession {
                 _ = timer_check_interval.tick() => {
                     self.check_t3_timeout();
                     if let Err(e) = self.check_t6_timeout().await {
-                        tracing::error!("Linktest T6 error: {}", e);
-                        return true;
+                        // T6 超时 = communication failure（SEMI E37）：断开当前连接并触发重连，
+                        // 与 stream IO 错误一致，不可当作进程级 shutdown。
+                        tracing::error!("HSMS communication failure (T6): {:?}, will reconnect", e);
+                        return false;
                     }
                 }
 
@@ -172,8 +177,12 @@ impl HsmsSession {
                     if !self.stream.read_buffer().is_empty() {
                         let last_read = self.stream.get_ref().last_read;
                         if last_read.elapsed() > self.config.t8 {
-                             tracing::error!("T8 Timeout: Inter-character timeout exceeded ({:?})", self.config.t8);
-                             return true;
+                             // T8 超时同样属 communication failure，断开并重连，非进程级 shutdown。
+                             tracing::error!(
+                                 "T8 communication failure: Inter-character timeout exceeded ({:?}), will reconnect",
+                                 self.config.t8,
+                             );
+                             return false;
                         }
                     }
                 }
@@ -189,7 +198,9 @@ impl HsmsSession {
             MessageType::Data => {
                 let sys_id = msg.header.system_bytes;
                 if let Some(entry) = self.t3_replies.remove(&sys_id) {
-                    let _ = entry.tx.send(Ok(msg));
+                    if let Some(tx) = entry.tx {
+                        let _ = tx.send(Ok(msg));
+                    }
                 } else if let Err(e) = self.inbound_tx.send(msg).await {
                     tracing::error!("Failed to send inbound message: {}", e);
                 }
@@ -203,11 +214,15 @@ impl HsmsSession {
                 if let Some(entry) = self.t6_replies.remove(&sys_id) {
                     if msg.header.function == 0 {
                         self.update_state(ConnectionState::Selected);
-                        let _ = entry.tx.send(Ok(msg));
+                        if let Some(tx) = entry.tx {
+                            let _ = tx.send(Ok(msg));
+                        }
                     } else {
-                        let _ = entry.tx.send(Err(HsmsError::Protocol {
-                            message: format!("Select.rsp error status: {}", msg.header.function),
-                        }));
+                        if let Some(tx) = entry.tx {
+                            let _ = tx.send(Err(HsmsError::Protocol {
+                                message: format!("Select.rsp error status: {}", msg.header.function),
+                            }));
+                        }
                         let _ = self.send_reject_rsp(&msg, 0x04).await;
                     }
                 } else {
@@ -224,8 +239,7 @@ impl HsmsSession {
             MessageType::LinktestRsp => {
                 tracing::debug!("Received LinktestRsp: {:?}", msg);
                 let sys_id = msg.header.system_bytes;
-                if let Some(entry) = self.t6_replies.remove(&sys_id) {
-                    let _ = entry.tx.send(Ok(msg));
+                if self.t6_replies.remove(&sys_id).is_some() {
                     tracing::debug!("Linktest success");
                 } else {
                     tracing::warn!("Unexpected LinktestRsp: no pending entry for sys_id {}", sys_id);
@@ -245,7 +259,9 @@ impl HsmsSession {
                 self.update_state(ConnectionState::NotSelected);
                 let sys_id = msg.header.system_bytes;
                 if let Some(entry) = self.t6_replies.remove(&sys_id) {
-                    let _ = entry.tx.send(Ok(msg));
+                    if let Some(tx) = entry.tx {
+                        let _ = tx.send(Ok(msg));
+                    }
                 }
             }
             MessageType::RejectReq => {
@@ -332,7 +348,7 @@ impl HsmsSession {
                     self.t3_replies.insert(
                         sys_id,
                         PendingReply {
-                            tx: reply_tx,
+                            tx: Some(reply_tx),
                             timeout_at: Instant::now() + self.config.t3,
                         },
                     );
@@ -350,7 +366,7 @@ impl HsmsSession {
                     self.t3_replies.insert(
                         sys_id,
                         PendingReply {
-                            tx: reply_tx,
+                            tx: Some(reply_tx),
                             timeout_at: Instant::now() + self.config.t3,
                         },
                     );
@@ -394,7 +410,7 @@ impl HsmsSession {
             self.t6_replies.insert(
                 sys_id,
                 PendingReply {
-                    tx: reply_tx,
+                    tx: Some(reply_tx),
                     timeout_at: now + self.config.t6,
                 },
             );
@@ -426,7 +442,7 @@ impl HsmsSession {
             self.t6_replies.insert(
                 sys_id,
                 PendingReply {
-                    tx: reply_tx,
+                    tx: Some(reply_tx),
                     timeout_at: now + self.config.t6,
                 },
             );
@@ -464,22 +480,33 @@ impl HsmsSession {
             .filter(|(_, v)| v.timeout_at <= now)
             .map(|(k, _)| *k)
             .collect();
-        if !timed_out_keys.is_empty() {
-            for k in timed_out_keys {
-                if let Some(entry) = self.t6_replies.remove(&k) {
-                    let _ = entry.tx.send(Err(HsmsError::Timeout {
+        if timed_out_keys.is_empty() {
+            return Ok(());
+        }
+        // T6 超时 = HSMS communication failure（SEMI E37）：控制事务未应答，
+        // 或 Linktest 健康探针未应答。统一判定当前连接失败，转 NotConnected
+        // 并由上层（run 返回 false）触发重连。
+        tracing::warn!(
+            "T6 communication failure: {} pending control transaction(s) timed out after {:?}, \
+             closing HSMS connection (will reconnect)",
+            timed_out_keys.len(),
+            self.config.t6,
+        );
+        for k in timed_out_keys {
+            if let Some(entry) = self.t6_replies.remove(&k) {
+                if let Some(tx) = entry.tx {
+                    let _ = tx.send(Err(HsmsError::Timeout {
                         kind: "T6",
                         duration: self.config.t6,
                     }));
                 }
             }
-            self.update_state(ConnectionState::NotConnected);
-            return Err(HsmsError::Timeout {
-                kind: "T6",
-                duration: self.config.t6,
-            });
         }
-        Ok(())
+        self.update_state(ConnectionState::NotConnected);
+        Err(HsmsError::Timeout {
+            kind: "T6",
+            duration: self.config.t6,
+        })
     }
 
     fn check_t3_timeout(&mut self) {
@@ -495,10 +522,12 @@ impl HsmsSession {
 
         for k in timed_out_keys {
             if let Some(entry) = self.t3_replies.remove(&k) {
-                let _ = entry.tx.send(Err(HsmsError::Timeout {
-                    kind: "T3",
-                    duration: self.config.t3,
-                }));
+                if let Some(tx) = entry.tx {
+                    let _ = tx.send(Err(HsmsError::Timeout {
+                        kind: "T3",
+                        duration: self.config.t3,
+                    }));
+                }
                 tracing::warn!("Transaction ID {} timed out", k);
             }
         }
@@ -519,12 +548,14 @@ impl HsmsSession {
         let req = HsmsMessage::linktest_req(sys_id);
         tracing::debug!("Sent LinktestReq: {:?}", req);
         self.stream.send(req).await.map_err(HsmsError::Io)?;
+        // Linktest 是 fire-and-forget 健康探针，无需回复通道（tx = None）；
+        // 但仍登记进 t6_replies，以便 check_t6_timeout 在 T6 内未收到 LinktestRsp 时
+        // 判定 communication failure（SEMI E37）。
         let now = Instant::now();
-        let (tx, _rx) = oneshot::channel();
         self.t6_replies.insert(
             sys_id,
             PendingReply {
-                tx,
+                tx: None,
                 timeout_at: now + self.config.t6,
             },
         );

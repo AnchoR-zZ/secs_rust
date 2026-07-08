@@ -107,6 +107,10 @@ impl HsmsManager {
                     .send(ConnectionState::NotConnected);
                 return;
             }
+
+            // run 返回 false：连接断开（TCP 错误或 T6/T8 communication failure），
+            // 回到 loop 顶部按 T5 重连。
+            tracing::info!("HSMS session ended, reconnecting...");
         }
     }
 
