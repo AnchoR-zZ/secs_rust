@@ -2,28 +2,12 @@
 name = "secs_rust"
 version = "0.1.0"
 edition = "2021"
-license = "MIT" 
+license = "MIT"
+description = "Greenfield HSMS-SS and SECS-II protocol library"
 
 [dependencies]
-tokio = { version = "1.48.0", features = ["sync", "net", "rt", "time", "macros"] }
-tokio-util = { version = "0.7.17", features = ["codec"]}
-futures = { version = "0.3"}
-tracing = "0.1"
-nom = "8.0.0"
-serde = { version = "1.0", features = ["derive"] }
+bytes = "1"
 thiserror = "2.0.18"
 
-[dev-dependencies]
-tracing-subscriber = "0.3.22"
-criterion = { version = "0.5", features = ["html_reports"] }
-tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
-
-[[bench]]
-name = "secs2_benchmark"
-harness = false
-path = "benchmark/secs2_benchmark.rs"
-
-[[bench]]
-name = "hsms_benchmark"
-harness = false
-path = "benchmark/hsms_benchmark.rs"
+[lints.rust]
+unsafe_code = "forbid"

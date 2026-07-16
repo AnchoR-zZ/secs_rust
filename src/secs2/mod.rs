@@ -1,48 +1,13 @@
-//! SECS-II 协议解析器
+//! SEMI E5 value types.
 //!
-//! 提供完整的SECS-II数据类型解析功能，支持所有SECS-II标准数据类型。
+//! Wave 0 defines the data model and decode limits. Binary encoding and
+//! decoding are deliberately left to the Wave 1 SECS-II work package.
 
-mod encoder;
-mod parser;
-mod types;
+pub mod codec;
+mod error;
+mod item;
+mod limits;
 
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum Secs2Error {
-    #[error("SECS2_E2001 invalid format code: {code}")]
-    InvalidFormatCode { code: u8 },
-    #[error("SECS2_E2002 invalid length bytes count: {count}")]
-    InvalidLengthBytesCount { count: u8 },
-    #[error("SECS2_E2003 incomplete data in {context}: need {needed}, got {actual}")]
-    IncompleteData {
-        context: &'static str,
-        needed: usize,
-        actual: usize,
-    },
-    #[error("SECS2_E2004 misaligned data: total {total_bytes}, item {item_size}")]
-    MisalignedData { total_bytes: usize, item_size: usize },
-    #[error("SECS2_E2005 count mismatch in {context}: expected {expected}, got {actual}")]
-    CountMismatch {
-        context: &'static str,
-        expected: usize,
-        actual: usize,
-    },
-    #[error("SECS2_E2006 unsupported type: {name}")]
-    UnsupportedType { name: &'static str },
-    #[error("SECS2_E2007 data length too large: {length}")]
-    LengthTooLarge { length: usize },
-    #[error("SECS2_E2008 invalid data: {message}")]
-    InvalidData { message: String },
-    #[error("SECS2_E2009 nesting too deep: {depth} (max {max})")]
-    NestingTooDeep { depth: u32, max: u32 },
-}
-
-// 导出主要类型和函数
-pub use encoder::encode;
-pub use Secs2Error as Error;
-pub use types::Secs2;
-
-// 导入测试模块
-#[cfg(test)]
-mod tests;
+pub use error::SecsItemError;
+pub use item::{AsciiString, LocalizedEncoding, LocalizedString, SecsItem};
+pub use limits::{DecodeLimits, MAX_ENCODED_ITEM_LENGTH};
