@@ -9,5 +9,5 @@ mod item;
 mod limits;
 
 pub use error::SecsItemError;
-pub use item::{AsciiString, LocalizedEncoding, LocalizedString, SecsItem};
+pub use item::{AsciiString, LocalizedEncodingCode, LocalizedString, SecsItem};
 pub use limits::{DecodeLimits, MAX_ENCODED_ITEM_LENGTH};

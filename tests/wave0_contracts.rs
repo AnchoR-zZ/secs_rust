@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use secs_rust::{
     AsciiString, ConfigError, ConnectionMode, ControlIntent, DecodeLimits, EndpointConfig,
     EndpointLimits, EndpointPhase, EndpointStateSnapshot, Function, GenerationSlotSnapshot,
-    LocalizedEncoding, LocalizedString, PrimaryMessage, RunningIntent, SecsItem, SecsItemError,
+    LocalizedEncodingCode, LocalizedString, PrimaryMessage, RunningIntent, SecsItem, SecsItemError,
     SessionId, Stream,
 };
 
@@ -71,11 +71,11 @@ fn ascii_is_strictly_seven_bit() {
 /// Verifies preservation of localized-string encoding metadata and payload.
 fn localized_strings_keep_the_e5_encoding_header() {
     assert_eq!(
-        LocalizedEncoding::new(0),
-        Err(SecsItemError::ReservedLocalizedEncoding)
+        LocalizedEncodingCode::new(0),
+        Err(SecsItemError::ReservedLocalizedEncodingCode)
     );
 
-    let encoding = LocalizedEncoding::new(2).expect("non-reserved encoding code");
+    let encoding = LocalizedEncodingCode::new(2).expect("non-reserved encoding code");
     let item = SecsItem::Localized(LocalizedString::new(encoding, "设备".as_bytes().to_vec()));
     let SecsItem::Localized(value) = item else {
         panic!("localized item");

@@ -1,59 +1,66 @@
 //! Immutable SECS-II item value types used by both the binary codec and SML.
 //!
 //! This module validates representation-level invariants such as seven-bit
-//! ASCII and localized-string encoding identifiers, but performs no I/O.
+//! ASCII and localized-string encoding codes, but performs no I/O.
 
 use std::fmt;
 
 use super::SecsItemError;
 
-/// E5 localized string encoding identifier.
+/// The 16-bit encoding code in a SEMI E5 Localized String Header (LSH).
+///
+/// This code is used only by item Format Code `22` (octal), named
+/// "2-byte character" in the E5 format table and defined as a localized
+/// character string. It occupies the first two bytes of that item's data
+/// area. It is neither the item's six-bit Format Code nor a Length Byte.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct LocalizedEncoding(
-    /// Non-zero E5 localized-character encoding identifier.
+pub struct LocalizedEncodingCode(
+    /// Non-zero 16-bit LSH encoding code preserved from or written to the wire.
     u16,
 );
 
-impl LocalizedEncoding {
-    /// Constructs an E5 localized encoding identifier from `value`.
+impl LocalizedEncodingCode {
+    /// Validates `value` as the 16-bit LSH encoding code for an E5 Format Code
+    /// `22` (octal) localized character string and returns its value object.
     ///
-    /// Returns the validated identifier, or
-    /// [`SecsItemError::ReservedLocalizedEncoding`] when `value` is zero.
+    /// Returns [`SecsItemError::ReservedLocalizedEncodingCode`] when `value`
+    /// is zero because E5 reserves encoding code zero.
     pub fn new(value: u16) -> Result<Self, SecsItemError> {
         if value == 0 {
-            return Err(SecsItemError::ReservedLocalizedEncoding);
+            return Err(SecsItemError::ReservedLocalizedEncodingCode);
         }
         Ok(Self(value))
     }
 
     #[must_use]
-    /// Returns the original two-byte E5 encoding identifier.
+    /// Returns the raw 16-bit encoding code carried in the two-byte LSH.
     pub const fn get(self) -> u16 {
         self.0
     }
 }
 
-/// A localized string whose two-byte encoding code is preserved separately
-/// from its encoded content.
+/// A Format Code `22` (octal) localized string whose two-byte LSH encoding
+/// code is preserved separately from its encoded character content.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalizedString {
-    /// Character encoding that applications must use to interpret `bytes`.
-    encoding: LocalizedEncoding,
-    /// Encoded character payload, excluding the two-byte encoding identifier.
+    /// LSH encoding code that applications use to interpret `bytes`.
+    encoding: LocalizedEncodingCode,
+    /// Encoded character payload, excluding the two-byte LSH encoding code.
     bytes: Vec<u8>,
 }
 
 impl LocalizedString {
     #[must_use]
-    /// Creates a localized string from its `encoding` and already encoded
-    /// payload `bytes`, returning the immutable value without transcoding it.
-    pub fn new(encoding: LocalizedEncoding, bytes: Vec<u8>) -> Self {
+    /// Creates a Format Code `22` (octal) localized string from its LSH
+    /// `encoding` code and already encoded payload `bytes`, returning the
+    /// immutable value without transcoding the payload.
+    pub fn new(encoding: LocalizedEncodingCode, bytes: Vec<u8>) -> Self {
         Self { encoding, bytes }
     }
 
     #[must_use]
-    /// Returns the E5 encoding identifier associated with the payload.
-    pub const fn encoding(&self) -> LocalizedEncoding {
+    /// Returns the two-byte LSH encoding code associated with the payload.
+    pub const fn encoding(&self) -> LocalizedEncodingCode {
         self.encoding
     }
 
@@ -159,7 +166,7 @@ pub enum SecsItem {
     Ascii(AsciiString),
     /// JIS-8 bytes preserved without Unicode transcoding.
     Jis8(Vec<u8>),
-    /// Localized characters paired with their E5 encoding identifier.
+    /// Format Code `22` (octal) characters paired with their LSH encoding code.
     Localized(LocalizedString),
     /// Eight-byte signed integers.
     I8(Vec<i64>),

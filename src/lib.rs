@@ -16,5 +16,5 @@ pub use hsms::{
     SessionState, Stream, TimeoutKind,
 };
 pub use secs2::{
-    AsciiString, DecodeLimits, LocalizedEncoding, LocalizedString, SecsItem, SecsItemError,
+    AsciiString, DecodeLimits, LocalizedEncodingCode, LocalizedString, SecsItem, SecsItemError,
 };

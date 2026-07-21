@@ -33,7 +33,8 @@ pub enum SecsItemError {
         maximum: usize,
     },
 
-    /// Encoding code zero is reserved by E5 for localized strings.
+    /// LSH encoding code zero is reserved by E5 for Format Code `22` (octal)
+    /// localized character strings.
     #[error("SECS-II localized string encoding code 0 is reserved")]
-    ReservedLocalizedEncoding,
+    ReservedLocalizedEncodingCode,
 }
