@@ -9,6 +9,17 @@ use super::SecsItemError;
 /// Maximum value representable by the one-to-three byte E5 length field.
 pub const MAX_ENCODED_ITEM_LENGTH: usize = 0x00FF_FFFF;
 
+/// Hard ceiling for List nesting accepted by the decoder.
+///
+/// [`crate::secs2::SecsItem`] is a recursively owned public enum, so the
+/// recursive destruction depth of a decoded tree or an already completed
+/// subtree during error cleanup grows in proportion to List nesting. Keeping
+/// that nesting at or below 256 gives every decoder-created cleanup path a
+/// small, fixed upper bound while remaining well above the depth used by
+/// practical SECS-II message schemas. Applications may configure a lower
+/// limit but cannot raise it beyond this safety boundary.
+pub const MAX_DECODE_NESTING_DEPTH: usize = 256;
+
 /// Resource limits applied by the strict SECS-II decoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecodeLimits {
@@ -27,7 +38,8 @@ impl DecodeLimits {
     /// per-item-byte, and per-List-child bounds.
     ///
     /// Returns the validated limits or a [`SecsItemError`] when any value is
-    /// zero or `max_item_bytes` exceeds the E5 three-byte length field.
+    /// zero, `max_depth` exceeds [`MAX_DECODE_NESTING_DEPTH`], or
+    /// `max_item_bytes` exceeds the E5 three-byte length field.
     pub fn new(
         max_depth: usize,
         max_total_items: usize,
@@ -44,8 +56,9 @@ impl DecodeLimits {
         Ok(limits)
     }
 
-    /// Verifies that every configured limit is non-zero and that the byte
-    /// limit is representable by the E5 length field.
+    /// Verifies that every configured limit is non-zero, the nesting limit is
+    /// bounded for safe recursive tree cleanup, and the byte limit is
+    /// representable by the E5 length field.
     ///
     /// Returns `Ok(())` when the limits are usable, otherwise the first
     /// validation error in field order.
@@ -59,6 +72,13 @@ impl DecodeLimits {
             if value == 0 {
                 return Err(SecsItemError::ZeroLimit { field });
             }
+        }
+
+        if self.max_depth > MAX_DECODE_NESTING_DEPTH {
+            return Err(SecsItemError::DepthLimitTooLarge {
+                value: self.max_depth,
+                maximum: MAX_DECODE_NESTING_DEPTH,
+            });
         }
 
         if self.max_item_bytes > MAX_ENCODED_ITEM_LENGTH {
@@ -97,7 +117,7 @@ impl DecodeLimits {
 }
 
 impl Default for DecodeLimits {
-    /// Returns permissive Wave 0 resource guardrails.
+    /// Returns the standard SECS-II decoder resource guardrails.
     ///
     /// The item-byte value follows the E5 protocol maximum. Depth and item
     /// counts are engineering defaults that applications should tune to their
@@ -109,5 +129,45 @@ impl Default for DecodeLimits {
             max_item_bytes: MAX_ENCODED_ITEM_LENGTH,
             max_list_items: 1_000_000,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for construction-time resource-limit validation.
+
+    use super::*;
+
+    /// Builds limits with the requested depth and otherwise valid default
+    /// values, returning the constructor result for boundary assertions.
+    fn limits_with_depth(max_depth: usize) -> Result<DecodeLimits, SecsItemError> {
+        let defaults = DecodeLimits::default();
+        DecodeLimits::new(
+            max_depth,
+            defaults.max_total_items(),
+            defaults.max_item_bytes(),
+            defaults.max_list_items(),
+        )
+    }
+
+    /// Confirms that the public hard nesting ceiling itself remains accepted.
+    #[test]
+    fn nesting_safety_ceiling_is_accepted() {
+        let limits = limits_with_depth(MAX_DECODE_NESTING_DEPTH).expect("safety ceiling");
+        assert_eq!(limits.max_depth(), MAX_DECODE_NESTING_DEPTH);
+    }
+
+    /// Confirms that a requested depth immediately above the safety ceiling
+    /// is rejected with a unit-specific construction error.
+    #[test]
+    fn nesting_depth_above_safety_ceiling_is_rejected() {
+        let requested = MAX_DECODE_NESTING_DEPTH + 1;
+        assert_eq!(
+            limits_with_depth(requested),
+            Err(SecsItemError::DepthLimitTooLarge {
+                value: requested,
+                maximum: MAX_DECODE_NESTING_DEPTH,
+            })
+        );
     }
 }

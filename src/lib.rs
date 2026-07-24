@@ -1,7 +1,9 @@
 //! A greenfield HSMS-SS and SECS-II protocol library.
 //!
-//! Wave 0 freezes value types and component boundaries. Protocol, transport,
-//! and asynchronous runtime behavior are implemented by later waves.
+//! The crate currently provides strict SECS-II binary encoding/decoding plus
+//! frozen HSMS value types and component boundaries. HSMS protocol state
+//! machines, transport integration, and asynchronous runtime behavior belong
+//! to later implementation waves.
 
 pub mod hsms;
 pub mod secs2;

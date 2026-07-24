@@ -56,7 +56,9 @@ pub(crate) enum OutboundProtocolFrame {
 }
 
 /// Pure adapter seam executed by SessionDriver, never by `HsmsCore` itself.
-/// Empty Message Text maps to `body = None`; non-empty text must decode to
+///
+/// Empty Message Text maps to `body = None`; implementations pass non-empty
+/// text to [`crate::secs2::codec::Secs2Decoder::decode_item`], which requires
 /// exactly one complete item with no trailing bytes.
 pub(crate) trait Secs2Profile {
     /// Concrete SECS-II encoding or decoding failure retained inside runtime.
@@ -64,8 +66,9 @@ pub(crate) trait Secs2Profile {
 
     /// Decodes `frame.text` as absent text or exactly one complete E5 item.
     ///
-    /// Returns the semantic frame on success or `Self::Error` for malformed,
-    /// trailing, or resource-limit-exceeding Message Text.
+    /// Empty text returns a semantic frame with `body = None`; non-empty text
+    /// is decoded strictly. Returns `Self::Error` for malformed, trailing, or
+    /// resource-limit-exceeding Message Text.
     fn decode_data(&self, frame: DataFrame) -> Result<Secs2DataFrame, Self::Error>;
 
     /// Encodes the optional body of semantic `frame` into wire-ready Data text.

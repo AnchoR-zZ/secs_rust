@@ -13,6 +13,12 @@ use super::SecsItemError;
 /// "2-byte character" in the E5 format table and defined as a localized
 /// character string. It occupies the first two bytes of that item's data
 /// area. It is neither the item's six-bit Format Code nor a Length Byte.
+///
+/// E5-0301 marks codes `15..=32767` for future standardization. For forward
+/// compatibility this value object rejects only code zero and preserves every
+/// other 16-bit code verbatim, including that future-reserved range. Acceptance
+/// does not imply that the library validates a character-set registry or can
+/// transcode the associated payload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LocalizedEncodingCode(
     /// Non-zero 16-bit LSH encoding code preserved from or written to the wire.
@@ -24,7 +30,10 @@ impl LocalizedEncodingCode {
     /// `22` (octal) localized character string and returns its value object.
     ///
     /// Returns [`SecsItemError::ReservedLocalizedEncodingCode`] when `value`
-    /// is zero because E5 reserves encoding code zero.
+    /// is zero because E5 reserves encoding code zero. All non-zero values are
+    /// preserved without registry validation; specifically, E5-0301's
+    /// future-reserved `15..=32767` range remains accepted for forward
+    /// compatibility and byte-faithful relay.
     pub fn new(value: u16) -> Result<Self, SecsItemError> {
         if value == 0 {
             return Err(SecsItemError::ReservedLocalizedEncodingCode);
