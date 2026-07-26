@@ -138,7 +138,7 @@ internal_id!(
 );
 internal_id!(
     OperationId,
-    "Identifies one Core operation across scheduling and completion."
+    "Identifies one application-requested or autonomous operation allocated and managed by Core."
 );
 internal_id!(
     WriteId,

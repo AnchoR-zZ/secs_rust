@@ -148,7 +148,9 @@ fn decode_limits_reject_invalid_resource_bounds() {
 #[test]
 /// Verifies endpoint queues and registries are bounded by validated capacities.
 fn endpoint_limits_bound_every_long_lived_queue_and_registry() {
-    let limits = EndpointLimits::new(10, 1, 2, 3, 4, 5, 6).expect("valid endpoint limits");
+    assert_eq!(EndpointLimits::default().reply_capability_capacity(), 256);
+
+    let limits = EndpointLimits::new(10, 1, 2, 3, 4, 5, 6, 7).expect("valid endpoint limits");
     assert_eq!(limits.max_message_length(), 10);
     assert_eq!(limits.command_capacity(), 1);
     assert_eq!(limits.critical_lane_capacity(), 2);
@@ -156,15 +158,22 @@ fn endpoint_limits_bound_every_long_lived_queue_and_registry() {
     assert_eq!(limits.application_event_capacity(), 4);
     assert_eq!(limits.transaction_capacity(), 5);
     assert_eq!(limits.tombstone_capacity(), 6);
+    assert_eq!(limits.reply_capability_capacity(), 7);
 
     assert_eq!(
-        EndpointLimits::new(10, 1, 2, 3, 4, 0, 6),
+        EndpointLimits::new(10, 1, 2, 3, 4, 0, 6, 7),
         Err(ConfigError::ZeroCapacity {
             field: "transaction_capacity",
         })
     );
     assert_eq!(
-        EndpointLimits::new(9, 1, 2, 3, 4, 5, 6),
+        EndpointLimits::new(10, 1, 2, 3, 4, 5, 6, 0),
+        Err(ConfigError::ZeroCapacity {
+            field: "reply_capability_capacity",
+        })
+    );
+    assert_eq!(
+        EndpointLimits::new(9, 1, 2, 3, 4, 5, 6, 7),
         Err(ConfigError::MessageLengthTooSmall { value: 9 })
     );
 }

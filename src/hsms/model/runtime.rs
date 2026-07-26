@@ -68,6 +68,20 @@ pub(crate) enum WriteResult {
     Indeterminate(TransportFault),
 }
 
+/// Communications timeout that makes an open generation unusable.
+///
+/// This close classification deliberately excludes application-operation
+/// timers such as T3 and endpoint-supervision timers such as Connect or T5.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommunicationsTimeoutKind {
+    /// T6 expired while waiting for a response to a committed control request.
+    T6,
+    /// T7 expired during one contiguous `NotSelected` tenure.
+    T7,
+    /// T8 expired between bytes of an incomplete inbound HSMS message.
+    T8,
+}
+
 /// Why the Core asks SessionDriver to terminate the current generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GenerationCloseReason {
@@ -83,4 +97,40 @@ pub(crate) enum GenerationCloseReason {
     ProtocolViolation,
     /// Reliable application delivery could not accept an inbound event.
     ApplicationBackpressure,
+    /// A communications timeout made the current generation unusable.
+    CommunicationsTimeout(CommunicationsTimeoutKind),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommunicationsTimeoutKind, GenerationCloseReason};
+
+    /// Converts every generation-closing communications timeout to its stable
+    /// diagnostic timer name, making the internal classification exhaustive.
+    fn timeout_name(kind: CommunicationsTimeoutKind) -> &'static str {
+        match kind {
+            CommunicationsTimeoutKind::T6 => "T6",
+            CommunicationsTimeoutKind::T7 => "T7",
+            CommunicationsTimeoutKind::T8 => "T8",
+        }
+    }
+
+    /// Confirms the generation close reason retains each allowed
+    /// communications-timeout classification without admitting other timers.
+    #[test]
+    fn communications_timeout_close_reason_is_exhaustive() {
+        for (kind, expected_name) in [
+            (CommunicationsTimeoutKind::T6, "T6"),
+            (CommunicationsTimeoutKind::T7, "T7"),
+            (CommunicationsTimeoutKind::T8, "T8"),
+        ] {
+            let GenerationCloseReason::CommunicationsTimeout(actual) =
+                GenerationCloseReason::CommunicationsTimeout(kind)
+            else {
+                panic!("constructed communications timeout changed variant");
+            };
+
+            assert_eq!(timeout_name(actual), expected_name);
+        }
+    }
 }

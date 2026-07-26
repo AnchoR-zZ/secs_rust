@@ -24,7 +24,10 @@ pub(crate) struct CoreTimeouts {
     t3: Duration,
     /// E37 control-transaction response timeout.
     t6: Duration,
-    /// E37 timeout for completing selection after TCP establishment.
+    /// Maximum duration of each contiguous `NotSelected` tenure.
+    ///
+    /// T7 starts or re-arms whenever the session enters or re-enters
+    /// `NotSelected`, and it is cancelled upon entering `Selected`.
     t7: Duration,
     /// Optional idle interval after which the Core initiates Linktest.
     linktest: Option<Duration>,
@@ -60,7 +63,10 @@ impl CoreTimeouts {
         self.t6
     }
 
-    /// Returns the E37 T7 timeout used while establishing selection.
+    /// Returns the maximum duration of each contiguous `NotSelected` tenure.
+    ///
+    /// T7 starts or re-arms whenever the session enters or re-enters
+    /// `NotSelected`, and it is cancelled upon entering `Selected`.
     pub(crate) const fn t7(self) -> Duration {
         self.t7
     }
@@ -78,19 +84,26 @@ pub(crate) struct CoreLimits {
     transaction_capacity: usize,
     /// Maximum number of completed transaction identities retained as tombstones.
     tombstone_capacity: usize,
+    /// Non-zero maximum number of live single-use reply capabilities.
+    reply_capability_capacity: usize,
 }
 
 impl CoreLimits {
     /// Creates the Core's narrow registry-capacity policy.
     ///
-    /// Generation assembly supplies `transaction_capacity` and
-    /// `tombstone_capacity` from already validated endpoint limits. This
-    /// constructor performs no additional validation and returns only the
-    /// capacities used by Core logic.
-    pub(crate) const fn new(transaction_capacity: usize, tombstone_capacity: usize) -> Self {
+    /// Generation assembly supplies `transaction_capacity`,
+    /// `tombstone_capacity`, and `reply_capability_capacity` from already
+    /// validated endpoint limits. This constructor performs no additional
+    /// validation and returns only the capacities used by Core logic.
+    pub(crate) const fn new(
+        transaction_capacity: usize,
+        tombstone_capacity: usize,
+        reply_capability_capacity: usize,
+    ) -> Self {
         Self {
             transaction_capacity,
             tombstone_capacity,
+            reply_capability_capacity,
         }
     }
 
@@ -102,6 +115,11 @@ impl CoreLimits {
     /// Returns the maximum number of retained transaction tombstones.
     pub(crate) const fn tombstone_capacity(self) -> usize {
         self.tombstone_capacity
+    }
+
+    /// Returns the non-zero maximum number of live reply capabilities.
+    pub(crate) const fn reply_capability_capacity(self) -> usize {
+        self.reply_capability_capacity
     }
 }
 

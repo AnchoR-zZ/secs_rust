@@ -245,10 +245,10 @@ fn control_header_bytes(message: ControlMessage) -> [u8; HSMS_HEADER_LENGTH] {
         ControlMessage::LinktestResponse { system_bytes } => (u16::MAX, 0, 0, 6, system_bytes),
         ControlMessage::RejectRequest {
             session_id,
-            rejected_type,
+            header_byte_2,
             reason,
             system_bytes,
-        } => (session_id, rejected_type, reason.get(), 7, system_bytes),
+        } => (session_id, header_byte_2, reason.get(), 7, system_bytes),
         ControlMessage::SeparateRequest {
             session_id,
             system_bytes,
@@ -302,6 +302,7 @@ mod tests {
             defaults.application_event_capacity(),
             defaults.transaction_capacity(),
             defaults.tombstone_capacity(),
+            defaults.reply_capability_capacity(),
         )
         .expect("valid test limits")
     }
@@ -595,7 +596,7 @@ mod tests {
             (
                 ControlMessage::RejectRequest {
                     session_id: 3,
-                    rejected_type: 8,
+                    header_byte_2: 8,
                     reason: RejectReason::new(1).expect("reason"),
                     system_bytes,
                 },

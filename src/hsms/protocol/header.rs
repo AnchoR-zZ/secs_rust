@@ -79,8 +79,17 @@ pub(crate) struct SelectStatus(
 );
 
 impl SelectStatus {
+    /// E37 status 0: selection completed successfully.
+    pub(crate) const SUCCESS: Self = Self(0);
+    /// E37 status 1: the HSMS entity is already active.
+    pub(crate) const ALREADY_ACTIVE: Self = Self(1);
+    /// E37 status 2: the HSMS entity is not ready for selection.
+    pub(crate) const NOT_READY: Self = Self(2);
+    /// E37 status 3: the HSMS entity has exhausted its connection resources.
+    pub(crate) const EXHAUSTED: Self = Self(3);
+
     /// Wraps the exact `Select.rsp` status byte without discarding
-    /// subsidiary-standard or vendor-defined values.
+    /// subsidiary-standard or locally defined values.
     pub(crate) const fn new(value: u8) -> Self {
         Self(value)
     }
@@ -92,7 +101,15 @@ impl SelectStatus {
 
     /// Returns `true` when the E37 success status value is zero.
     pub(crate) const fn is_success(self) -> bool {
-        self.0 == 0
+        self.0 == Self::SUCCESS.0
+    }
+
+    /// Returns `true` for one of E37's four named base-standard statuses.
+    ///
+    /// A `false` result does not make the raw status invalid: subsidiary
+    /// standards and local implementations may define additional values.
+    pub(crate) const fn is_base_standard(self) -> bool {
+        self.0 <= Self::EXHAUSTED.0
     }
 }
 
@@ -104,7 +121,15 @@ pub(crate) struct DeselectStatus(
 );
 
 impl DeselectStatus {
-    /// Wraps the exact `Deselect.rsp` status byte without narrowing the value.
+    /// E37 status 0: deselection completed successfully.
+    pub(crate) const SUCCESS: Self = Self(0);
+    /// E37 status 1: no selected communication exists.
+    pub(crate) const NOT_SELECTED: Self = Self(1);
+    /// E37 status 2: the HSMS entity is busy and cannot deselect.
+    pub(crate) const BUSY: Self = Self(2);
+
+    /// Wraps the exact `Deselect.rsp` status byte without discarding
+    /// subsidiary-standard or locally defined values.
     pub(crate) const fn new(value: u8) -> Self {
         Self(value)
     }
@@ -116,7 +141,15 @@ impl DeselectStatus {
 
     /// Returns `true` when the E37 success status value is zero.
     pub(crate) const fn is_success(self) -> bool {
-        self.0 == 0
+        self.0 == Self::SUCCESS.0
+    }
+
+    /// Returns `true` for one of E37's three named base-standard statuses.
+    ///
+    /// A `false` result preserves a potentially subsidiary-standard or local
+    /// status for higher-level policy and diagnostics.
+    pub(crate) const fn is_base_standard(self) -> bool {
+        self.0 <= Self::BUSY.0
     }
 }
 
@@ -128,10 +161,21 @@ pub(crate) struct RejectReason(
 );
 
 impl RejectReason {
+    /// E37 reason 1: the received SType is not supported.
+    pub(crate) const UNSUPPORTED_STYPE: Self = Self::from_non_zero_literal(1);
+    /// E37 reason 2: the received PType is not supported.
+    pub(crate) const UNSUPPORTED_PTYPE: Self = Self::from_non_zero_literal(2);
+    /// E37 reason 3: no open transaction matches the received message.
+    pub(crate) const TRANSACTION_NOT_OPEN: Self = Self::from_non_zero_literal(3);
+    /// E37 reason 4: the HSMS entity is not selected.
+    pub(crate) const ENTITY_NOT_SELECTED: Self = Self::from_non_zero_literal(4);
+
     /// Validates `value` as an E37 rejection reason.
     ///
     /// Returns `None` for zero, which E37 reserves and the strict Wire
-    /// validator classifies as an invalid control header.
+    /// validator classifies as an invalid control header. Every non-zero raw
+    /// value is preserved so subsidiary standards and local implementations
+    /// can define additional reasons.
     pub(crate) const fn new(value: u8) -> Option<Self> {
         match NonZeroU8::new(value) {
             Some(value) => Some(Self(value)),
@@ -142,6 +186,22 @@ impl RejectReason {
     /// Returns the exact non-zero reason byte.
     pub(crate) const fn get(self) -> u8 {
         self.0.get()
+    }
+
+    /// Returns `true` for one of E37's four named base-standard reasons.
+    ///
+    /// A `false` result denotes a preserved extension value, not an invalid
+    /// reason.
+    pub(crate) const fn is_base_standard(self) -> bool {
+        self.get() <= Self::ENTITY_NOT_SELECTED.get()
+    }
+
+    /// Constructs one named non-zero constant from its checked literal.
+    const fn from_non_zero_literal(value: u8) -> Self {
+        match NonZeroU8::new(value) {
+            Some(value) => Self(value),
+            None => panic!("RejectReason named constants must be non-zero"),
+        }
     }
 }
 
@@ -198,8 +258,11 @@ pub(crate) enum ControlMessage {
     RejectRequest {
         /// Two-byte control Session ID retained exactly.
         session_id: u16,
-        /// Rejected message's raw SType copied into Header Byte 2.
-        rejected_type: u8,
+        /// Exact Header Byte 2 copied from the rejected message.
+        ///
+        /// E37 reason 2 identifies this byte as PType; every other base reason
+        /// identifies it as SType.
+        header_byte_2: u8,
         /// Validated non-zero E37 rejection reason.
         reason: RejectReason,
         /// System Bytes associated with the rejected message.
@@ -227,5 +290,48 @@ impl ControlMessage {
             | Self::RejectRequest { system_bytes, .. }
             | Self::SeparateRequest { system_bytes, .. } => system_bytes,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeselectStatus, RejectReason, SelectStatus};
+
+    /// Confirms every named base-standard status maps to its E37 wire value.
+    #[test]
+    fn named_status_constants_match_e37_values() {
+        assert_eq!(SelectStatus::SUCCESS.get(), 0);
+        assert_eq!(SelectStatus::ALREADY_ACTIVE.get(), 1);
+        assert_eq!(SelectStatus::NOT_READY.get(), 2);
+        assert_eq!(SelectStatus::EXHAUSTED.get(), 3);
+        assert_eq!(DeselectStatus::SUCCESS.get(), 0);
+        assert_eq!(DeselectStatus::NOT_SELECTED.get(), 1);
+        assert_eq!(DeselectStatus::BUSY.get(), 2);
+    }
+
+    /// Confirms named Reject reasons map to their E37 wire values.
+    #[test]
+    fn named_reject_reason_constants_match_e37_values() {
+        assert_eq!(RejectReason::UNSUPPORTED_STYPE.get(), 1);
+        assert_eq!(RejectReason::UNSUPPORTED_PTYPE.get(), 2);
+        assert_eq!(RejectReason::TRANSACTION_NOT_OPEN.get(), 3);
+        assert_eq!(RejectReason::ENTITY_NOT_SELECTED.get(), 4);
+    }
+
+    /// Confirms extension status and reason bytes remain lossless raw values.
+    #[test]
+    fn subsidiary_and_local_values_remain_lossless() {
+        let select = SelectStatus::new(0x80);
+        let deselect = DeselectStatus::new(0x81);
+        let reject = RejectReason::new(0x82).expect("non-zero extension reason");
+
+        assert_eq!(select.get(), 0x80);
+        assert!(!select.is_base_standard());
+        assert!(!select.is_success());
+        assert_eq!(deselect.get(), 0x81);
+        assert!(!deselect.is_base_standard());
+        assert!(!deselect.is_success());
+        assert_eq!(reject.get(), 0x82);
+        assert!(!reject.is_base_standard());
     }
 }

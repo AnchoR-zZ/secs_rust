@@ -16,4 +16,6 @@ pub use message::{
 };
 
 pub(crate) use command::ProtocolCommand;
-pub(crate) use completion::CommandCompletion;
+/// Crate-only completion seam shared by Core and its runtime result router.
+#[allow(unused_imports)]
+pub(crate) use completion::{CommandCompletion, CompletionValue};

@@ -1,15 +1,12 @@
 //! Typed protocol commands accepted by endpoint admission and submitted to Core.
 //!
-//! Every command carries separate command and operation identities so runtime
-//! delivery, protocol execution, and exactly-once completion can be correlated
-//! without exposing raw HSMS headers to applications.
+//! Every command carries the application command identity used for exactly-once
+//! completion. `HsmsCore` allocates the separate operation identity only after
+//! it accepts a command or starts an autonomous protocol operation.
 
 #![allow(dead_code)]
 
-use crate::{
-    hsms::model::ids::{CommandId, OperationId},
-    secs2::SecsItem,
-};
+use crate::{hsms::model::ids::CommandId, secs2::SecsItem};
 
 use super::{PrimaryMessage, ReplyToken};
 
@@ -21,7 +18,9 @@ pub enum ControlIntent {
     Select,
     /// Initiate the HSMS Deselect handshake.
     Deselect,
-    /// Probe the selected connection with Linktest.
+    /// Probe the peer with Linktest while the generation remains open and the
+    /// session is `NotSelected` or `Selected`; `Closing` and `Closed` sessions
+    /// cannot start a probe.
     Linktest,
     /// Send `Separate.req` and terminate the generation without a response.
     Separate,
@@ -34,8 +33,6 @@ pub(crate) enum ProtocolCommand {
     Send {
         /// Application command whose completion must be delivered exactly once.
         command_id: CommandId,
-        /// Core operation tracked through scheduling and write completion.
-        operation_id: OperationId,
         /// Application-provided primary content; the Core supplies W=0 metadata.
         message: PrimaryMessage,
     },
@@ -43,8 +40,6 @@ pub(crate) enum ProtocolCommand {
     Request {
         /// Application command whose Secondary or failure completes the request.
         command_id: CommandId,
-        /// Core operation tracked through write, T3, and response matching.
-        operation_id: OperationId,
         /// Application-provided primary content; the Core supplies W=1 metadata.
         message: PrimaryMessage,
     },
@@ -52,8 +47,6 @@ pub(crate) enum ProtocolCommand {
     Reply {
         /// Application command completed when the Secondary frame commits.
         command_id: CommandId,
-        /// Core operation tracked through scheduling and write completion.
-        operation_id: OperationId,
         /// Single-use authority containing generation and transaction metadata.
         token: ReplyToken,
         /// Optional Secondary Message Text supplied by the application.
@@ -63,8 +56,6 @@ pub(crate) enum ProtocolCommand {
     Control {
         /// Application command completed by the control transaction outcome.
         command_id: CommandId,
-        /// Core operation tracked through control state and any write/timer work.
-        operation_id: OperationId,
         /// Control operation requested without exposing a raw header.
         intent: ControlIntent,
     },

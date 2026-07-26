@@ -266,6 +266,7 @@ mod tests {
             defaults.application_event_capacity(),
             defaults.transaction_capacity(),
             defaults.tombstone_capacity(),
+            defaults.reply_capability_capacity(),
         )
         .expect("valid test limits")
     }
@@ -321,7 +322,7 @@ mod tests {
     fn fixed_reject_request_decodes_and_reencodes_exactly() {
         let expected = ProtocolMessage::Control(ControlMessage::RejectRequest {
             session_id: 0,
-            rejected_type: 0,
+            header_byte_2: 0,
             reason: RejectReason::new(4).expect("non-zero fixed reason"),
             system_bytes: SystemBytes::new(0x11),
         });

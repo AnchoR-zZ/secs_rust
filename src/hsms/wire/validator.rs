@@ -150,7 +150,7 @@ fn validate_control(header: RawHeader, s_type: u8) -> Result<ControlMessage, Hea
                 .ok_or_else(|| violation(header, HeaderViolationKind::InvalidControlHeader))?;
             ControlMessage::RejectRequest {
                 session_id,
-                rejected_type: header_byte_2,
+                header_byte_2,
                 reason,
                 system_bytes,
             }
@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(error.kind(), HeaderViolationKind::InvalidControlHeader);
     }
 
-    /// Confirms a non-zero Reject reason and rejected type are preserved.
+    /// Confirms a non-zero Reject reason and Header Byte 2 are preserved.
     #[test]
     fn reject_request_is_fully_typed() {
         let frame = StrictFrameValidator::new()
@@ -387,7 +387,7 @@ mod tests {
             frame,
             ValidatedFrame::Control(ControlMessage::RejectRequest {
                 session_id: 9,
-                rejected_type: 2,
+                header_byte_2: 2,
                 reason: RejectReason::new(3).expect("non-zero"),
                 system_bytes: SystemBytes::new(11),
             })

@@ -45,12 +45,8 @@ pub enum GenerationSlotSnapshot {
 pub enum SessionState {
     /// TCP is established but the HSMS session is not selected.
     NotSelected,
-    /// `Select.req` is pending or passive selection is being processed.
-    Selecting,
     /// The session may exchange HSMS Data messages.
     Selected,
-    /// A Deselect control transaction is in progress.
-    Deselecting,
     /// The session has entered protocol/runtime shutdown.
     Closing,
     /// This generation can no longer process protocol work.

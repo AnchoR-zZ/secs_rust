@@ -3,6 +3,8 @@
 //! These errors describe invalid configuration, identifiers, protocol
 //! decisions, and operation outcomes without exposing socket or runtime types.
 
+use std::num::NonZeroU8;
+
 use thiserror::Error;
 
 use crate::{hsms::model::ids::Function, secs2::SecsItemError};
@@ -69,7 +71,7 @@ pub enum TimeoutKind {
     T5,
     /// Control-transaction reply timeout.
     T6,
-    /// Selection timeout after TCP establishment.
+    /// Maximum duration of one contiguous `NotSelected` tenure.
     T7,
     /// Inter-byte timeout while receiving one HSMS message.
     T8,
@@ -140,6 +142,31 @@ pub enum OperationError {
     #[error("operation was rejected by bounded admission")]
     Backpressure,
 
+    /// The peer returned a non-success `Select.rsp` status.
+    #[error("peer rejected Select.req with E37 status {status}")]
+    SelectRejected {
+        /// Exact non-zero E37 Select status, including extension values.
+        status: NonZeroU8,
+    },
+
+    /// The peer returned a non-success `Deselect.rsp` status.
+    #[error("peer rejected Deselect.req with E37 status {status}")]
+    DeselectRejected {
+        /// Exact non-zero E37 Deselect status, including extension values.
+        status: NonZeroU8,
+    },
+
+    /// A reply token was stale, already consumed, or no longer registered.
+    #[error("reply capability is unavailable")]
+    ReplyCapabilityUnavailable,
+
+    /// The peer sent `Reject.req` for work associated with this operation.
+    #[error("peer rejected the operation with E37 reason {reason}")]
+    PeerRejected {
+        /// Exact non-zero E37 Reject reason, including extension values.
+        reason: NonZeroU8,
+    },
+
     /// The operation exceeded the named protocol or runtime deadline.
     #[error("HSMS {0:?} timeout")]
     Timeout(TimeoutKind),
@@ -159,4 +186,42 @@ pub enum OperationError {
     /// A protocol decision prevented successful completion.
     #[error(transparent)]
     Protocol(#[from] ProtocolError),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU8;
+
+    use super::OperationError;
+
+    /// Confirms all public peer-rejection errors require non-zero wire values
+    /// and render the preserved numeric status or reason.
+    #[test]
+    fn peer_rejection_errors_preserve_non_zero_wire_values() {
+        let select_status = NonZeroU8::new(2).expect("non-zero Select status");
+        let deselect_status = NonZeroU8::new(1).expect("non-zero Deselect status");
+        let reject_reason = NonZeroU8::new(4).expect("non-zero Reject reason");
+
+        assert_eq!(
+            OperationError::SelectRejected {
+                status: select_status
+            }
+            .to_string(),
+            "peer rejected Select.req with E37 status 2"
+        );
+        assert_eq!(
+            OperationError::DeselectRejected {
+                status: deselect_status
+            }
+            .to_string(),
+            "peer rejected Deselect.req with E37 status 1"
+        );
+        assert_eq!(
+            OperationError::PeerRejected {
+                reason: reject_reason
+            }
+            .to_string(),
+            "peer rejected the operation with E37 reason 4"
+        );
+    }
 }

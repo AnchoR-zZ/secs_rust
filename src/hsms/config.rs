@@ -34,7 +34,10 @@ pub struct HsmsTimeouts {
     t5: Duration,
     /// E37 control-transaction response timeout.
     t6: Duration,
-    /// E37 timeout for completing selection after TCP establishment.
+    /// Maximum duration of each contiguous `NotSelected` tenure.
+    ///
+    /// T7 starts or re-arms whenever the session enters or re-enters
+    /// `NotSelected`, and it is cancelled upon entering `Selected`.
     t7: Duration,
     /// E37 maximum interval between bytes of an incomplete message.
     t8: Duration,
@@ -120,7 +123,10 @@ impl HsmsTimeouts {
     }
 
     #[must_use]
-    /// Returns the E37 T7 selection timeout.
+    /// Returns the maximum duration of each contiguous `NotSelected` tenure.
+    ///
+    /// T7 starts or re-arms whenever the session enters or re-enters
+    /// `NotSelected`, and it is cancelled upon entering `Selected`.
     pub const fn t7(self) -> Duration {
         self.t7
     }
@@ -170,6 +176,8 @@ pub struct EndpointLimits {
     transaction_capacity: usize,
     /// Maximum number of completed transaction identities retained as tombstones.
     tombstone_capacity: usize,
+    /// Maximum number of live single-use inbound reply capabilities.
+    reply_capability_capacity: usize,
 }
 
 impl EndpointLimits {
@@ -188,6 +196,7 @@ impl EndpointLimits {
         application_event_capacity: usize,
         transaction_capacity: usize,
         tombstone_capacity: usize,
+        reply_capability_capacity: usize,
     ) -> Result<Self, ConfigError> {
         let limits = Self {
             max_message_length,
@@ -197,6 +206,7 @@ impl EndpointLimits {
             application_event_capacity,
             transaction_capacity,
             tombstone_capacity,
+            reply_capability_capacity,
         };
         limits.validate()?;
         Ok(limits)
@@ -227,6 +237,7 @@ impl EndpointLimits {
             ),
             ("transaction_capacity", self.transaction_capacity),
             ("tombstone_capacity", self.tombstone_capacity),
+            ("reply_capability_capacity", self.reply_capability_capacity),
         ] {
             if value == 0 {
                 return Err(ConfigError::ZeroCapacity { field });
@@ -280,6 +291,12 @@ impl EndpointLimits {
     pub const fn tombstone_capacity(self) -> usize {
         self.tombstone_capacity
     }
+
+    #[must_use]
+    /// Returns the maximum number of live inbound reply capabilities.
+    pub const fn reply_capability_capacity(self) -> usize {
+        self.reply_capability_capacity
+    }
 }
 
 impl Default for EndpointLimits {
@@ -293,6 +310,7 @@ impl Default for EndpointLimits {
             application_event_capacity: 256,
             transaction_capacity: 256,
             tombstone_capacity: 512,
+            reply_capability_capacity: 256,
         }
     }
 }
