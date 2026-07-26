@@ -11,6 +11,12 @@ use crate::hsms::model::{
 
 mod coordinator;
 
+/// Pure drain state and decisions re-exported for the future Core reducer.
+#[allow(unused_imports)]
+pub(crate) use coordinator::{
+    DrainCoordinator, DrainDecision, DrainState, IgnoredDrainInput, TransportCloseTrigger,
+};
+
 /// Exact writer boundary retained while local Separate drains.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct WriteBarrier {
@@ -77,6 +83,17 @@ impl DrainRequest {
     /// Returns the exact resolved transport-close boundary.
     pub(crate) const fn barrier(self) -> ResolvedCloseBarrier {
         self.barrier
+    }
+
+    /// Returns whether this request must bypass an exact-write wait.
+    ///
+    /// `LocalSeparate` is the only reason allowed to wait for an outbound
+    /// frame. Every other generation-close reason is treated as immediate even
+    /// if a caller supplied `AfterWrite`, preventing fatal shutdown from
+    /// deadlocking behind a writer that may never terminate.
+    pub(crate) const fn requires_immediate_close(self) -> bool {
+        matches!(self.barrier, ResolvedCloseBarrier::Immediate)
+            || !matches!(self.reason, GenerationCloseReason::LocalSeparate)
     }
 }
 
