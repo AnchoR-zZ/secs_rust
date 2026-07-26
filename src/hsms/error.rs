@@ -117,9 +117,20 @@ pub enum OperationError {
     #[error("HSMS endpoint has no open TCP generation")]
     NotConnected,
 
-    /// A Data operation was attempted outside the Selected state.
-    #[error("HSMS session is not selected")]
+    /// An operation that requires an established Selected session was
+    /// attempted in another session state.
+    #[error("HSMS operation requires a Selected session")]
     NotSelected,
+
+    /// A Select procedure was requested while the session was already in the
+    /// stable Selected state.
+    #[error("HSMS session is already selected")]
+    AlreadySelected,
+
+    /// The generation's unique transactional-control slot is already occupied
+    /// by another Select, Deselect, or Linktest procedure.
+    #[error("another transactional HSMS control procedure is already in progress")]
+    ControlBusy,
 
     /// A previously accepted operation was aborted because the session left
     /// the Selected state.
@@ -193,6 +204,24 @@ mod tests {
     use std::num::NonZeroU8;
 
     use super::OperationError;
+
+    /// Confirms session-state and control-slot precondition failures expose
+    /// stable, operation-specific diagnostics.
+    #[test]
+    fn operation_precondition_errors_have_specific_diagnostics() {
+        assert_eq!(
+            OperationError::NotSelected.to_string(),
+            "HSMS operation requires a Selected session"
+        );
+        assert_eq!(
+            OperationError::AlreadySelected.to_string(),
+            "HSMS session is already selected"
+        );
+        assert_eq!(
+            OperationError::ControlBusy.to_string(),
+            "another transactional HSMS control procedure is already in progress"
+        );
+    }
 
     /// Confirms all public peer-rejection errors require non-zero wire values
     /// and render the preserved numeric status or reason.

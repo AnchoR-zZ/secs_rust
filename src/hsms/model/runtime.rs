@@ -89,6 +89,8 @@ pub(crate) enum GenerationCloseReason {
     LocalStop,
     /// The application explicitly requested connection replacement.
     LocalDisconnect,
+    /// The application sent `Separate.req` and then ended the generation.
+    LocalSeparate,
     /// The peer sent `Separate.req`.
     SeparateReceived,
     /// The underlying transport can no longer carry protocol traffic.

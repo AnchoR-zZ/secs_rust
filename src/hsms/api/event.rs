@@ -18,6 +18,8 @@ pub enum ConnectionCloseReason {
     LocalStop,
     /// The application requested replacement of the current connection.
     LocalDisconnect,
+    /// The application sent `Separate.req` and then closed the connection.
+    LocalSeparate,
     /// The peer sent `Separate.req`.
     SeparateReceived,
     /// The TCP transport was lost or became unusable.

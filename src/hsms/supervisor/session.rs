@@ -34,6 +34,8 @@ pub(crate) enum SessionExitReason {
     LocalStop,
     /// The application requested disconnection of this generation.
     LocalDisconnect,
+    /// The application sent `Separate.req` and then ended this generation.
+    LocalSeparate,
     /// The peer sent `Separate.req`.
     SeparateReceived,
     /// The TCP transport ended or became unusable.
