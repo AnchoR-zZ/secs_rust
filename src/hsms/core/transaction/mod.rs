@@ -13,9 +13,10 @@ mod registry;
 pub(crate) use matcher::{MatcherBuildError, MatcherDecision, MismatchField, ResponseMatcher};
 #[allow(unused_imports)]
 pub(crate) use registry::{
-    CloseDecision, CloseOperation, CollisionSource, CommitDecision, ControlCollision, ControlKind,
-    ControlTakeDecision, ExpiryDecision, FinishDecision, InboundDataDecision, MarkVisibleDecision,
-    OneWayKind, OperationClass, OperationVisibility, RegistryBuildError, ReserveError,
-    ReservedControl, ReservedOneWay, ReservedRequest, TombstoneArrival, TombstoneCategory,
-    TransactionRegistry,
+    CloseDecision, CloseOperation, CollisionSource, CommitDecision, ControlCollision,
+    ControlCorrelation, ControlKind, ControlTakeDecision, ExpiryDecision, FinishDecision,
+    InboundDataDecision, MarkVisibleDecision, OneWayKind, OperationClass, OperationDisposition,
+    OperationVisibility, RegistryBuildError, ReserveError, ReservedControl, ReservedOneWay,
+    ReservedRequest, SessionResetDecision, SessionResetOperation, TombstoneArrival,
+    TombstoneCategory, TransactionRegistry,
 };

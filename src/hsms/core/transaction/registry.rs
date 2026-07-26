@@ -123,9 +123,11 @@ pub(crate) enum TombstoneCategory {
     DeliveryIndeterminate,
     /// Generation close removed an operation already committed or possibly visible.
     ClosedAfterVisibility,
+    /// Session deselection removed Data work that was already possibly peer-visible.
+    SessionDeselectedAfterVisibility,
     /// A W=0 Data or `Separate.req` frame committed locally.
     OneWayCommitted,
-    /// The exact kind and System Bytes control response completed its request.
+    /// The exact kind, Session ID, and System Bytes response completed its control request.
     ControlResponseMatched,
     /// The exact committed control request exceeded T6.
     ControlExpired,
@@ -194,10 +196,8 @@ impl ReservedOneWay {
 pub(crate) struct ReservedControl {
     /// Core operation that owns the control slot.
     operation_id: OperationId,
-    /// Non-zero locally allocated System Bytes used by the control request.
-    system_bytes: SystemBytes,
-    /// Typed control request that the eventual response must match.
-    kind: ControlKind,
+    /// Exact request identity that the eventual response must echo.
+    correlation: ControlCorrelation,
 }
 
 impl ReservedControl {
@@ -208,12 +208,59 @@ impl ReservedControl {
 
     /// Returns the locally allocated System Bytes used to build its header.
     pub(crate) const fn system_bytes(self) -> SystemBytes {
-        self.system_bytes
+        self.correlation.system_bytes()
     }
 
     /// Returns the response kind required to consume the control slot.
     pub(crate) const fn kind(self) -> ControlKind {
+        self.correlation.kind()
+    }
+
+    /// Returns the raw control Session ID the response must echo.
+    pub(crate) const fn session_id(self) -> u16 {
+        self.correlation.session_id()
+    }
+
+    /// Returns the complete response correlation contract.
+    pub(crate) const fn correlation(self) -> ControlCorrelation {
+        self.correlation
+    }
+}
+
+/// Atomic identity used to correlate one control request and response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ControlCorrelation {
+    /// Typed request/response pair represented by this identity.
+    kind: ControlKind,
+    /// Raw two-byte control Session ID that the response must echo.
+    session_id: u16,
+    /// Locally allocated transaction correlation value.
+    system_bytes: SystemBytes,
+}
+
+impl ControlCorrelation {
+    /// Builds an exact control correlation identity from all E37 echo fields.
+    const fn new(kind: ControlKind, session_id: u16, system_bytes: SystemBytes) -> Self {
+        Self {
+            kind,
+            session_id,
+            system_bytes,
+        }
+    }
+
+    /// Returns the typed control request/response pair.
+    pub(crate) const fn kind(self) -> ControlKind {
         self.kind
+    }
+
+    /// Returns the raw two-byte control Session ID.
+    pub(crate) const fn session_id(self) -> u16 {
+        self.session_id
+    }
+
+    /// Returns the control transaction's System Bytes.
+    pub(crate) const fn system_bytes(self) -> SystemBytes {
+        self.system_bytes
     }
 }
 
@@ -433,22 +480,26 @@ pub(crate) enum InboundDataDecision {
 /// Owner that rejected an inbound control response without being consumed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ControlCollision {
-    /// Another live control transaction owns the single slot.
+    /// A live control transaction rejected at least one response field.
     Live {
-        /// Live control kind that did not match the response.
-        kind: ControlKind,
-        /// System Bytes expected by the live transaction.
-        system_bytes: SystemBytes,
+        /// Complete correlation identity retained by the live slot.
+        expected: ControlCorrelation,
+        /// Complete correlation identity supplied by the inbound response.
+        actual: ControlCorrelation,
     },
-    /// A tombstone with the same System Bytes retained a different control kind.
+    /// A control tombstone rejected at least one response field.
     Tombstone {
-        /// Control kind retained by the tombstone.
-        kind: ControlKind,
+        /// Complete correlation identity retained by terminal memory.
+        expected: ControlCorrelation,
+        /// Complete correlation identity supplied by the inbound response.
+        actual: ControlCorrelation,
         /// Terminal category retained by the tombstone.
         category: TombstoneCategory,
     },
     /// A Data or one-way tombstone retained the response's System Bytes.
     OtherTombstone {
+        /// Complete inbound control identity colliding with non-control memory.
+        actual: ControlCorrelation,
         /// Terminal category retained by the non-control tombstone.
         category: TombstoneCategory,
     },
@@ -457,23 +508,23 @@ pub(crate) enum ControlCollision {
 /// Result of matching and taking a typed control response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ControlTakeDecision {
-    /// Kind and System Bytes exactly consumed the live control slot.
+    /// Kind, Session ID, and System Bytes exactly consumed the live control slot.
     Matched {
         /// Operation completed by the response.
         operation_id: OperationId,
-        /// System Bytes released into terminal correlation memory.
-        system_bytes: SystemBytes,
-        /// Exact control kind that matched.
-        kind: ControlKind,
+        /// Exact three-field response correlation that matched.
+        correlation: ControlCorrelation,
         /// Exact T6 registration Core must cancel, if it had been armed.
         cancel_t6: Option<TimerToken>,
         /// Visibility state when the response won the serialized race.
         visibility: OperationVisibility,
     },
-    /// Exact kind and System Bytes matched a terminal control tombstone.
+    /// Exact kind, Session ID, and System Bytes matched a control tombstone.
     Tombstoned {
         /// Original operation associated with the tombstone.
         operation_id: OperationId,
+        /// Exact three-field correlation retained by terminal memory.
+        correlation: ControlCorrelation,
         /// Terminal category that retained this correlation identity.
         category: TombstoneCategory,
         /// Whether the response duplicates success or arrived after another end.
@@ -488,10 +539,10 @@ pub(crate) enum ControlTakeDecision {
     NoPending,
 }
 
-/// One operation drained by the first generation-close transition.
+/// One live operation removed by a lifecycle boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CloseOperation {
-    /// Live operation removed by close.
+pub(crate) struct OperationDisposition {
+    /// Live operation removed by the lifecycle transition.
     operation_id: OperationId,
     /// System Bytes released or retained as a tombstone.
     system_bytes: SystemBytes,
@@ -499,14 +550,14 @@ pub(crate) struct CloseOperation {
     class: OperationClass,
     /// Exact timer Core must cancel, if one was armed.
     cancel_timer: Option<TimerToken>,
-    /// Strongest peer-visibility evidence held at close.
+    /// Strongest peer-visibility evidence held at removal.
     visibility: OperationVisibility,
-    /// Terminal memory created because the frame was visible or committed.
+    /// Terminal memory created because the frame was possibly visible.
     tombstone: Option<TombstoneCategory>,
 }
 
-impl CloseOperation {
-    /// Returns the operation identity removed by close.
+impl OperationDisposition {
+    /// Returns the operation identity removed by the lifecycle transition.
     pub(crate) const fn operation_id(self) -> OperationId {
         self.operation_id
     }
@@ -526,16 +577,22 @@ impl CloseOperation {
         self.cancel_timer
     }
 
-    /// Returns the strongest visibility evidence held at close.
+    /// Returns the strongest visibility evidence held at removal.
     pub(crate) const fn visibility(self) -> OperationVisibility {
         self.visibility
     }
 
-    /// Returns the close tombstone category, or `None` if never visible.
+    /// Returns the lifecycle tombstone category, or `None` if never visible.
     pub(crate) const fn tombstone(self) -> Option<TombstoneCategory> {
         self.tombstone
     }
 }
+
+/// Operation disposition returned by permanent generation close.
+pub(crate) type CloseOperation = OperationDisposition;
+
+/// Operation disposition returned by a re-selectable session reset.
+pub(crate) type SessionResetOperation = OperationDisposition;
 
 /// Idempotent result of beginning registry close.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -559,6 +616,30 @@ impl CloseDecision {
 
     /// Consumes the decision and returns its close dispositions.
     pub(crate) fn into_operations(self) -> Vec<CloseOperation> {
+        self.operations
+    }
+}
+
+/// Data-only dispositions produced when a selected session ends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SessionResetDecision {
+    /// Live W=1 and W=0 Data work removed in stable operation-id order.
+    operations: Vec<SessionResetOperation>,
+}
+
+impl SessionResetDecision {
+    /// Returns whether the reset found no selected-session Data work to remove.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
+
+    /// Borrows the deterministic operation-id-ordered reset dispositions.
+    pub(crate) fn operations(&self) -> &[SessionResetOperation] {
+        &self.operations
+    }
+
+    /// Consumes the decision and returns its reset dispositions.
+    pub(crate) fn into_operations(self) -> Vec<SessionResetOperation> {
         self.operations
     }
 }
@@ -594,10 +675,8 @@ struct OneWayEntry {
 struct ControlEntry {
     /// Operation owning this slot.
     operation_id: OperationId,
-    /// Locally allocated correlation value.
-    system_bytes: SystemBytes,
-    /// Exact response kind required to consume the slot.
-    kind: ControlKind,
+    /// Exact kind, Session ID, and System Bytes required of the response.
+    correlation: ControlCorrelation,
     /// Strongest writer visibility evidence.
     visibility: OperationVisibility,
     /// Exact T6 token attached only after local commit.
@@ -652,8 +731,8 @@ enum TombstoneSubject {
     Request(ResponseMatcher),
     /// Allocation-only memory for an unacknowledged outbound frame.
     OneWay(OneWayKind),
-    /// Exact typed control response retained after control termination.
-    Control(ControlKind),
+    /// Exact kind, Session ID, and System Bytes retained after control termination.
+    Control(ControlCorrelation),
 }
 
 /// Bounded terminal correlation record indexed by System Bytes.
@@ -682,21 +761,14 @@ struct RemovedOperation {
     visibility: OperationVisibility,
     /// Exact timer removed from the timer index, if present.
     timer: Option<TimerToken>,
-    /// Request matcher retained only for W=1 operations.
-    matcher: Option<ResponseMatcher>,
+    /// Exact matching semantics retained if terminal memory is required.
+    subject: TombstoneSubject,
 }
 
 impl RemovedOperation {
     /// Converts this removed operation into its tombstone matching subject.
     fn tombstone_subject(self) -> TombstoneSubject {
-        match self.class {
-            OperationClass::Request => TombstoneSubject::Request(
-                self.matcher
-                    .expect("removed request must retain its response matcher"),
-            ),
-            OperationClass::OneWay(kind) => TombstoneSubject::OneWay(kind),
-            OperationClass::Control(kind) => TombstoneSubject::Control(kind),
-        }
+        self.subject
     }
 }
 
@@ -869,25 +941,30 @@ impl TransactionRegistry {
 
     /// Atomically reserves the independent transactional control slot.
     ///
+    /// `operation_id` is the Core-owned completion identity, `kind` selects the
+    /// expected response type, and `session_id` is the raw request-header value
+    /// that the response must echo.
+    ///
     /// A full W=1 Data registry does not block this slot. A second concurrent
     /// control request is rejected without advancing System Bytes.
     pub(crate) fn reserve_control(
         &mut self,
         operation_id: OperationId,
         kind: ControlKind,
+        session_id: u16,
     ) -> Result<ReservedControl, ReserveError> {
         self.ensure_reservation_allowed(operation_id)?;
         if let Some(pending) = self.control {
             return Err(ReserveError::ControlSlotOccupied {
-                pending: pending.kind,
+                pending: pending.correlation.kind(),
             });
         }
 
         let system_bytes = self.find_available_system_bytes()?;
+        let correlation = ControlCorrelation::new(kind, session_id, system_bytes);
         let entry = ControlEntry {
             operation_id,
-            system_bytes,
-            kind,
+            correlation,
             visibility: OperationVisibility::NotVisible,
             timer: None,
         };
@@ -900,8 +977,7 @@ impl TransactionRegistry {
 
         Ok(ReservedControl {
             operation_id,
-            system_bytes,
-            kind,
+            correlation,
         })
     }
 
@@ -1146,18 +1222,23 @@ impl TransactionRegistry {
         }
         if let Some(control) = self
             .control
-            .filter(|entry| entry.system_bytes == system_bytes)
+            .filter(|entry| entry.correlation.system_bytes() == system_bytes)
         {
             return InboundDataDecision::Mismatch {
                 message,
-                collision: CollisionSource::LiveControl { kind: control.kind },
+                collision: CollisionSource::LiveControl {
+                    kind: control.correlation.kind(),
+                },
             };
         }
 
         InboundDataDecision::OrphanSecondary { message }
     }
 
-    /// Matches an inbound typed control response by both kind and System Bytes.
+    /// Matches an inbound typed control response by kind, Session ID, and System Bytes.
+    ///
+    /// `kind`, `session_id`, and `system_bytes` are the three fields extracted
+    /// from the inbound response. None may mismatch the reserved request.
     ///
     /// An exact match consumes the slot and creates a tombstone. Exact old
     /// tombstones are classified before reporting a mismatch against a newer
@@ -1165,11 +1246,13 @@ impl TransactionRegistry {
     pub(crate) fn take_control(
         &mut self,
         kind: ControlKind,
+        session_id: u16,
         system_bytes: SystemBytes,
     ) -> ControlTakeDecision {
+        let actual = ControlCorrelation::new(kind, session_id, system_bytes);
         if self
             .control
-            .is_some_and(|entry| entry.kind == kind && entry.system_bytes == system_bytes)
+            .is_some_and(|entry| entry.correlation == actual)
         {
             let operation_id = self
                 .control
@@ -1182,8 +1265,7 @@ impl TransactionRegistry {
             self.insert_tombstone(removed, category);
             return ControlTakeDecision::Matched {
                 operation_id,
-                system_bytes,
-                kind,
+                correlation: actual,
                 cancel_t6: removed.timer,
                 visibility: removed.visibility,
             };
@@ -1191,9 +1273,10 @@ impl TransactionRegistry {
 
         if let Some(tombstone) = self.tombstones.get(&system_bytes) {
             return match tombstone.subject {
-                TombstoneSubject::Control(retained_kind) if retained_kind == kind => {
+                TombstoneSubject::Control(expected) if expected == actual => {
                     ControlTakeDecision::Tombstoned {
                         operation_id: tombstone.operation_id,
+                        correlation: expected,
                         category: tombstone.category,
                         arrival: if tombstone.category == TombstoneCategory::ControlResponseMatched
                         {
@@ -1203,15 +1286,17 @@ impl TransactionRegistry {
                         },
                     }
                 }
-                TombstoneSubject::Control(retained_kind) => ControlTakeDecision::Mismatch {
+                TombstoneSubject::Control(expected) => ControlTakeDecision::Mismatch {
                     collision: ControlCollision::Tombstone {
-                        kind: retained_kind,
+                        expected,
+                        actual,
                         category: tombstone.category,
                     },
                 },
                 TombstoneSubject::Request(_) | TombstoneSubject::OneWay(_) => {
                     ControlTakeDecision::Mismatch {
                         collision: ControlCollision::OtherTombstone {
+                            actual,
                             category: tombstone.category,
                         },
                     }
@@ -1222,8 +1307,8 @@ impl TransactionRegistry {
         if let Some(control) = self.control {
             return ControlTakeDecision::Mismatch {
                 collision: ControlCollision::Live {
-                    kind: control.kind,
-                    system_bytes: control.system_bytes,
+                    expected: control.correlation,
+                    actual,
                 },
             };
         }
@@ -1289,7 +1374,7 @@ impl TransactionRegistry {
         };
         if !self.control.is_some_and(|entry| {
             entry.operation_id == operation_id
-                && entry.system_bytes == system_bytes
+                && entry.correlation.system_bytes() == system_bytes
                 && entry.timer == Some(token)
         }) {
             return ExpiryDecision::Stale;
@@ -1307,6 +1392,50 @@ impl TransactionRegistry {
             class,
             visibility: removed.visibility,
         }
+    }
+
+    /// Removes work owned by the selected Data session without closing the registry.
+    ///
+    /// Every live W=1 request and W=0 Data lease is removed in ascending
+    /// `OperationId` order. Exact T3 registrations are returned for
+    /// cancellation. Never-visible work creates no tombstone, while possibly
+    /// visible work creates `SessionDeselectedAfterVisibility` terminal memory
+    /// under the existing bounded FIFO policy. `Separate.req`, the independent
+    /// control slot, allocator cursor, and admission state remain intact.
+    /// Existing tombstones are not cleared, although inserting new visible-work
+    /// tombstones can apply the registry's normal bounded FIFO eviction. The
+    /// same TCP generation can therefore be selected again.
+    pub(crate) fn reset_selected_session(&mut self) -> SessionResetDecision {
+        let mut operation_ids: Vec<_> = self
+            .operations
+            .iter()
+            .filter_map(|(operation_id, locator)| {
+                matches!(
+                    locator,
+                    OperationLocator::Request(_) | OperationLocator::OneWay(_, OneWayKind::Data)
+                )
+                .then_some(*operation_id)
+            })
+            .collect();
+        operation_ids.sort_unstable();
+
+        let mut operations = Vec::with_capacity(operation_ids.len());
+        for operation_id in operation_ids {
+            let removed = self
+                .remove_live_operation(operation_id)
+                .expect("session-reset operation snapshot must remain removable");
+            let category = if removed.visibility.needs_tombstone() {
+                Some(TombstoneCategory::SessionDeselectedAfterVisibility)
+            } else {
+                None
+            };
+            if let Some(category) = category {
+                self.insert_tombstone(removed, category);
+            }
+            operations.push(Self::operation_disposition(removed, category));
+        }
+
+        SessionResetDecision { operations }
     }
 
     /// Permanently closes reservation admission and drains every live operation.
@@ -1339,14 +1468,7 @@ impl TransactionRegistry {
             if let Some(category) = category {
                 self.insert_tombstone(removed, category);
             }
-            operations.push(CloseOperation {
-                operation_id: removed.operation_id,
-                system_bytes: removed.system_bytes,
-                class: removed.class,
-                cancel_timer: removed.timer,
-                visibility: removed.visibility,
-                tombstone: category,
-            });
+            operations.push(Self::operation_disposition(removed, category));
         }
 
         CloseDecision {
@@ -1393,7 +1515,7 @@ impl TransactionRegistry {
             || self.one_way.contains_key(&system_bytes)
             || self
                 .control
-                .is_some_and(|entry| entry.system_bytes == system_bytes)
+                .is_some_and(|entry| entry.correlation.system_bytes() == system_bytes)
             || self.tombstones.contains_key(&system_bytes)
     }
 
@@ -1432,7 +1554,7 @@ impl TransactionRegistry {
             }
             OperationLocator::Control(system_bytes, _) => {
                 let entry = self.control.expect("operation index must locate control");
-                debug_assert_eq!(entry.system_bytes, system_bytes);
+                debug_assert_eq!(entry.correlation.system_bytes(), system_bytes);
                 entry.visibility
             }
         }
@@ -1458,7 +1580,7 @@ impl TransactionRegistry {
                     .control
                     .as_mut()
                     .expect("operation index must locate control");
-                debug_assert_eq!(entry.system_bytes, system_bytes);
+                debug_assert_eq!(entry.correlation.system_bytes(), system_bytes);
                 entry.visibility = visibility;
             }
         }
@@ -1475,7 +1597,7 @@ impl TransactionRegistry {
             }
             OperationLocator::Control(system_bytes, _) => {
                 let entry = self.control.expect("operation index must locate control");
-                debug_assert_eq!(entry.system_bytes, system_bytes);
+                debug_assert_eq!(entry.correlation.system_bytes(), system_bytes);
                 entry.timer
             }
             OperationLocator::OneWay(_, _) => None,
@@ -1496,7 +1618,7 @@ impl TransactionRegistry {
                     .control
                     .as_mut()
                     .expect("operation index must locate control");
-                debug_assert_eq!(entry.system_bytes, system_bytes);
+                debug_assert_eq!(entry.correlation.system_bytes(), system_bytes);
                 entry.timer = timer;
             }
             OperationLocator::OneWay(_, _) => {
@@ -1520,7 +1642,7 @@ impl TransactionRegistry {
                     class: OperationClass::Request,
                     visibility: entry.visibility,
                     timer: entry.timer,
-                    matcher: Some(entry.matcher),
+                    subject: TombstoneSubject::Request(entry.matcher),
                 }
             }
             OperationLocator::OneWay(system_bytes, kind) => {
@@ -1535,7 +1657,7 @@ impl TransactionRegistry {
                     class: OperationClass::OneWay(entry.kind),
                     visibility: entry.visibility,
                     timer: None,
-                    matcher: None,
+                    subject: TombstoneSubject::OneWay(entry.kind),
                 }
             }
             OperationLocator::Control(system_bytes, kind) => {
@@ -1543,15 +1665,15 @@ impl TransactionRegistry {
                     .control
                     .take()
                     .expect("operation index must locate control");
-                debug_assert_eq!(entry.system_bytes, system_bytes);
-                debug_assert_eq!(entry.kind, kind);
+                debug_assert_eq!(entry.correlation.system_bytes(), system_bytes);
+                debug_assert_eq!(entry.correlation.kind(), kind);
                 RemovedOperation {
                     operation_id: entry.operation_id,
-                    system_bytes: entry.system_bytes,
-                    class: OperationClass::Control(entry.kind),
+                    system_bytes: entry.correlation.system_bytes(),
+                    class: OperationClass::Control(entry.correlation.kind()),
                     visibility: entry.visibility,
                     timer: entry.timer,
-                    matcher: None,
+                    subject: TombstoneSubject::Control(entry.correlation),
                 }
             }
         };
@@ -1634,6 +1756,21 @@ impl TransactionRegistry {
         }
     }
 
+    /// Converts removed ownership into a lifecycle-boundary disposition.
+    const fn operation_disposition(
+        removed: RemovedOperation,
+        tombstone: Option<TombstoneCategory>,
+    ) -> OperationDisposition {
+        OperationDisposition {
+            operation_id: removed.operation_id,
+            system_bytes: removed.system_bytes,
+            class: removed.class,
+            cancel_timer: removed.timer,
+            visibility: removed.visibility,
+            tombstone,
+        }
+    }
+
     /// Classifies an exact request-tombstone Data arrival as duplicate or late.
     const fn data_tombstone_arrival(
         category: TombstoneCategory,
@@ -1662,6 +1799,9 @@ mod tests {
     };
 
     use super::*;
+
+    /// Raw control Session ID echoed by ordinary test responses.
+    const CONTROL_SESSION_ID: u16 = 0xFFFF;
 
     /// Creates a registry for generation seven with the supplied independent bounds.
     fn registry(request_capacity: usize, tombstone_capacity: usize) -> TransactionRegistry {
@@ -1788,17 +1928,21 @@ mod tests {
             );
         }
         if let Some(entry) = registry.control {
-            assert!(occupied.insert(entry.system_bytes));
+            let system_bytes = entry.correlation.system_bytes();
+            assert!(occupied.insert(system_bytes));
             assert_eq!(
                 registry.operations.get(&entry.operation_id),
-                Some(&OperationLocator::Control(entry.system_bytes, entry.kind))
+                Some(&OperationLocator::Control(
+                    system_bytes,
+                    entry.correlation.kind()
+                ))
             );
             if let Some(token) = entry.timer {
                 assert_eq!(
                     registry.timers.get(&token),
                     Some(&TimerOwner::Control {
                         operation_id: entry.operation_id,
-                        system_bytes: entry.system_bytes,
+                        system_bytes,
                     })
                 );
             }
@@ -1822,7 +1966,7 @@ mod tests {
                 } => {
                     let entry = registry.control.expect("timer control owner");
                     assert_eq!(entry.operation_id, *operation_id);
-                    assert_eq!(entry.system_bytes, *system_bytes);
+                    assert_eq!(entry.correlation.system_bytes(), *system_bytes);
                     assert_eq!(entry.timer, Some(*token));
                 }
             }
@@ -1837,6 +1981,9 @@ mod tests {
                 .get(system_bytes)
                 .expect("FIFO tombstone index");
             assert_eq!(tombstone.system_bytes, *system_bytes);
+            if let TombstoneSubject::Control(correlation) = tombstone.subject {
+                assert_eq!(correlation.system_bytes(), *system_bytes);
+            }
             assert!(occupied.insert(*system_bytes));
         }
         assert_eq!(ordered_tombstones.len(), registry.tombstones.len());
@@ -1892,7 +2039,7 @@ mod tests {
             .reserve_one_way(OperationId::new(2), OneWayKind::Data)
             .expect("one-way");
         let control = registry
-            .reserve_control(OperationId::new(3), ControlKind::Select)
+            .reserve_control(OperationId::new(3), ControlKind::Select, CONTROL_SESSION_ID)
             .expect("control");
         let completed_one_way = registry
             .reserve_one_way(OperationId::new(4), OneWayKind::Separate)
@@ -1925,7 +2072,11 @@ mod tests {
             .reserve_one_way(OperationId::new(2), OneWayKind::Data)
             .expect("one-way has no request-capacity cost");
         let control = registry
-            .reserve_control(OperationId::new(3), ControlKind::Linktest)
+            .reserve_control(
+                OperationId::new(3),
+                ControlKind::Linktest,
+                CONTROL_SESSION_ID,
+            )
             .expect("control has its own slot");
 
         assert_eq!(registry.request_len(), 1);
@@ -1941,12 +2092,16 @@ mod tests {
     fn control_slot_failure_does_not_advance_allocator() {
         let mut registry = registry(1, 4);
         registry
-            .reserve_control(OperationId::new(1), ControlKind::Select)
+            .reserve_control(OperationId::new(1), ControlKind::Select, CONTROL_SESSION_ID)
             .expect("first control");
         let next = registry.allocator.next_candidate();
 
         assert_eq!(
-            registry.reserve_control(OperationId::new(2), ControlKind::Deselect),
+            registry.reserve_control(
+                OperationId::new(2),
+                ControlKind::Deselect,
+                CONTROL_SESSION_ID,
+            ),
             Err(ReserveError::ControlSlotOccupied {
                 pending: ControlKind::Select,
             })
@@ -2403,46 +2558,155 @@ mod tests {
         assert_index_invariants(&registry);
     }
 
-    /// Confirms control response consumption requires both typed kind and System Bytes.
+    /// Confirms a control response must match kind, Session ID, and System Bytes atomically.
     #[test]
-    fn control_take_matches_kind_and_system_bytes() {
+    fn control_take_matches_complete_correlation_identity() {
         let mut registry = registry(1, 4);
         let control = registry
-            .reserve_control(OperationId::new(1), ControlKind::Select)
+            .reserve_control(OperationId::new(1), ControlKind::Select, 0x1234)
+            .expect("control");
+        let expected = control.correlation();
+        assert_eq!(control.kind(), ControlKind::Select);
+        assert_eq!(control.session_id(), 0x1234);
+
+        let wrong_kind =
+            ControlCorrelation::new(ControlKind::Deselect, 0x1234, control.system_bytes());
+        assert_eq!(
+            registry.take_control(
+                wrong_kind.kind(),
+                wrong_kind.session_id(),
+                wrong_kind.system_bytes(),
+            ),
+            ControlTakeDecision::Mismatch {
+                collision: ControlCollision::Live {
+                    expected,
+                    actual: wrong_kind,
+                },
+            }
+        );
+
+        let wrong_system_bytes =
+            ControlCorrelation::new(ControlKind::Select, 0x1234, SystemBytes::new(999));
+        assert_eq!(
+            registry.take_control(
+                wrong_system_bytes.kind(),
+                wrong_system_bytes.session_id(),
+                wrong_system_bytes.system_bytes(),
+            ),
+            ControlTakeDecision::Mismatch {
+                collision: ControlCollision::Live {
+                    expected,
+                    actual: wrong_system_bytes,
+                },
+            }
+        );
+
+        let wrong_session =
+            ControlCorrelation::new(ControlKind::Select, 0x4321, control.system_bytes());
+        assert_eq!(
+            registry.take_control(
+                wrong_session.kind(),
+                wrong_session.session_id(),
+                wrong_session.system_bytes(),
+            ),
+            ControlTakeDecision::Mismatch {
+                collision: ControlCollision::Live {
+                    expected,
+                    actual: wrong_session,
+                },
+            }
+        );
+        assert!(registry.has_control());
+
+        assert_eq!(
+            registry.take_control(
+                expected.kind(),
+                expected.session_id(),
+                expected.system_bytes(),
+            ),
+            ControlTakeDecision::Matched {
+                operation_id: control.operation_id(),
+                correlation: expected,
+                cancel_t6: None,
+                visibility: OperationVisibility::NotVisible,
+            }
+        );
+        assert_eq!(
+            registry.take_control(
+                expected.kind(),
+                expected.session_id(),
+                expected.system_bytes(),
+            ),
+            ControlTakeDecision::Tombstoned {
+                operation_id: control.operation_id(),
+                correlation: expected,
+                category: TombstoneCategory::ControlResponseMatched,
+                arrival: TombstoneArrival::Duplicate,
+            }
+        );
+        assert_index_invariants(&registry);
+    }
+
+    /// Confirms a wrong control Session ID neither consumes the slot nor cancels T6.
+    #[test]
+    fn control_session_mismatch_preserves_live_slot_and_t6() {
+        let mut registry = registry(1, 4);
+        let control = registry
+            .reserve_control(OperationId::new(1), ControlKind::Deselect, 0x0042)
+            .expect("control");
+        let token = t6(1);
+        registry.mark_committed(control.operation_id(), token);
+        let expected = control.correlation();
+        let actual = ControlCorrelation::new(ControlKind::Deselect, 0x0043, control.system_bytes());
+
+        assert_eq!(
+            registry.take_control(actual.kind(), actual.session_id(), actual.system_bytes(),),
+            ControlTakeDecision::Mismatch {
+                collision: ControlCollision::Live { expected, actual },
+            }
+        );
+        assert!(registry.has_control());
+        assert!(registry.timers.contains_key(&token));
+        assert_eq!(
+            registry.take_control(
+                expected.kind(),
+                expected.session_id(),
+                expected.system_bytes(),
+            ),
+            ControlTakeDecision::Matched {
+                operation_id: control.operation_id(),
+                correlation: expected,
+                cancel_t6: Some(token),
+                visibility: OperationVisibility::Committed,
+            }
+        );
+        assert_eq!(registry.expire_control(token), ExpiryDecision::Stale);
+        assert_index_invariants(&registry);
+    }
+
+    /// Confirms a control response may win before commit and suppress later T6 arming.
+    #[test]
+    fn fast_control_response_is_terminal_before_write_commit() {
+        let mut registry = registry(1, 4);
+        let control = registry
+            .reserve_control(OperationId::new(1), ControlKind::Select, CONTROL_SESSION_ID)
             .expect("control");
 
         assert!(matches!(
-            registry.take_control(ControlKind::Deselect, control.system_bytes()),
-            ControlTakeDecision::Mismatch {
-                collision: ControlCollision::Live {
-                    kind: ControlKind::Select,
-                    ..
-                },
-            }
-        ));
-        assert!(matches!(
-            registry.take_control(ControlKind::Select, SystemBytes::new(999)),
-            ControlTakeDecision::Mismatch {
-                collision: ControlCollision::Live { .. },
-            }
-        ));
-        assert!(registry.has_control());
-        assert!(matches!(
-            registry.take_control(ControlKind::Select, control.system_bytes()),
+            registry.take_control(control.kind(), control.session_id(), control.system_bytes(),),
             ControlTakeDecision::Matched {
-                operation_id,
                 cancel_t6: None,
-                ..
-            } if operation_id == control.operation_id()
-        ));
-        assert!(matches!(
-            registry.take_control(ControlKind::Select, control.system_bytes()),
-            ControlTakeDecision::Tombstoned {
-                category: TombstoneCategory::ControlResponseMatched,
-                arrival: TombstoneArrival::Duplicate,
+                visibility: OperationVisibility::NotVisible,
                 ..
             }
         ));
+        assert_eq!(
+            registry.mark_committed(control.operation_id(), t6(1)),
+            CommitDecision::AlreadyTerminal {
+                category: TombstoneCategory::ControlResponseMatched,
+            }
+        );
+        assert!(registry.timers.is_empty());
         assert_index_invariants(&registry);
     }
 
@@ -2451,7 +2715,11 @@ mod tests {
     fn control_expiry_requires_exact_t6() {
         let mut registry = registry(1, 4);
         let control = registry
-            .reserve_control(OperationId::new(1), ControlKind::Linktest)
+            .reserve_control(
+                OperationId::new(1),
+                ControlKind::Linktest,
+                CONTROL_SESSION_ID,
+            )
             .expect("control");
         let token = t6(1);
         assert!(matches!(
@@ -2471,14 +2739,36 @@ mod tests {
             }
         ));
         assert_eq!(registry.expire_control(token), ExpiryDecision::Stale);
-        assert!(matches!(
-            registry.take_control(ControlKind::Linktest, control.system_bytes()),
+        let expected = control.correlation();
+        let wrong_session =
+            ControlCorrelation::new(ControlKind::Linktest, 0x0001, control.system_bytes());
+        assert_eq!(
+            registry.take_control(
+                wrong_session.kind(),
+                wrong_session.session_id(),
+                wrong_session.system_bytes(),
+            ),
+            ControlTakeDecision::Mismatch {
+                collision: ControlCollision::Tombstone {
+                    expected,
+                    actual: wrong_session,
+                    category: TombstoneCategory::ControlExpired,
+                },
+            }
+        );
+        assert_eq!(
+            registry.take_control(
+                expected.kind(),
+                expected.session_id(),
+                expected.system_bytes(),
+            ),
             ControlTakeDecision::Tombstoned {
+                operation_id: control.operation_id(),
+                correlation: expected,
                 category: TombstoneCategory::ControlExpired,
                 arrival: TombstoneArrival::Late,
-                ..
             }
-        ));
+        );
         assert_index_invariants(&registry);
     }
 
@@ -2502,6 +2792,193 @@ mod tests {
         assert_index_invariants(&registry);
     }
 
+    /// Confirms session reset removes only Data work and returns stable dispositions.
+    #[test]
+    fn session_reset_drains_data_and_preserves_generation_owned_state() {
+        let mut registry = registry(4, 16);
+        let existing_tombstone = registry
+            .reserve_one_way(OperationId::new(90), OneWayKind::Separate)
+            .expect("terminal Separate lease");
+        registry.finish_one_way(existing_tombstone.operation_id());
+
+        let invisible_request = reserve_request(&mut registry, 40);
+        let visible_request = reserve_request(&mut registry, 10);
+        registry.mark_visible(visible_request.operation_id());
+        let committed_request = reserve_request(&mut registry, 30);
+        let request_timer = t3(30);
+        registry.mark_committed(committed_request.operation_id(), request_timer);
+        let invisible_data = registry
+            .reserve_one_way(OperationId::new(20), OneWayKind::Data)
+            .expect("invisible Data lease");
+        let visible_data = registry
+            .reserve_one_way(OperationId::new(50), OneWayKind::Data)
+            .expect("visible Data lease");
+        registry.mark_visible(visible_data.operation_id());
+
+        let separate = registry
+            .reserve_one_way(OperationId::new(60), OneWayKind::Separate)
+            .expect("live Separate lease");
+        registry.mark_visible(separate.operation_id());
+        let control = registry
+            .reserve_control(
+                OperationId::new(70),
+                ControlKind::Linktest,
+                CONTROL_SESSION_ID,
+            )
+            .expect("live control");
+        let control_timer = t6(70);
+        registry.mark_committed(control.operation_id(), control_timer);
+        let next_candidate = registry.allocator.next_candidate();
+
+        let reset = registry.reset_selected_session();
+
+        assert!(!reset.is_empty());
+        assert_eq!(
+            reset
+                .operations()
+                .iter()
+                .map(|operation| operation.operation_id().get())
+                .collect::<Vec<_>>(),
+            vec![10, 20, 30, 40, 50]
+        );
+        assert_eq!(reset.operations()[0].class(), OperationClass::Request);
+        assert_eq!(
+            reset.operations()[0].visibility(),
+            OperationVisibility::MayBeVisible
+        );
+        assert_eq!(
+            reset.operations()[0].tombstone(),
+            Some(TombstoneCategory::SessionDeselectedAfterVisibility)
+        );
+        assert_eq!(
+            reset.operations()[1].class(),
+            OperationClass::OneWay(OneWayKind::Data)
+        );
+        assert_eq!(
+            reset.operations()[1].operation_id(),
+            invisible_data.operation_id()
+        );
+        assert_eq!(
+            reset.operations()[1].visibility(),
+            OperationVisibility::NotVisible
+        );
+        assert_eq!(reset.operations()[1].tombstone(), None);
+        assert_eq!(reset.operations()[2].cancel_timer(), Some(request_timer));
+        assert_eq!(
+            reset.operations()[2].operation_id(),
+            committed_request.operation_id()
+        );
+        assert_eq!(
+            reset.operations()[2].visibility(),
+            OperationVisibility::Committed
+        );
+        assert_eq!(
+            reset.operations()[2].tombstone(),
+            Some(TombstoneCategory::SessionDeselectedAfterVisibility)
+        );
+        assert_eq!(
+            reset.operations()[3].operation_id(),
+            invisible_request.operation_id()
+        );
+        assert_eq!(reset.operations()[3].tombstone(), None);
+        assert_eq!(
+            reset.operations()[4].class(),
+            OperationClass::OneWay(OneWayKind::Data)
+        );
+        assert_eq!(
+            reset.operations()[4].tombstone(),
+            Some(TombstoneCategory::SessionDeselectedAfterVisibility)
+        );
+
+        assert_eq!(registry.request_len(), 0);
+        assert_eq!(registry.one_way_len(), 1);
+        assert!(registry.has_control());
+        assert_eq!(registry.allocator.next_candidate(), next_candidate);
+        assert!(registry
+            .tombstones
+            .contains_key(&existing_tombstone.system_bytes()));
+        assert!(registry.timers.contains_key(&control_timer));
+        assert!(!registry.timers.contains_key(&request_timer));
+        assert_eq!(registry.expire_t3(request_timer), ExpiryDecision::Stale);
+        assert!(matches!(
+            registry.classify_inbound(exact_response(visible_request)),
+            InboundDataDecision::Tombstoned {
+                category: TombstoneCategory::SessionDeselectedAfterVisibility,
+                arrival: TombstoneArrival::Late,
+                ..
+            }
+        ));
+        assert!(matches!(
+            registry.finish_one_way(separate.operation_id()),
+            FinishDecision::Finished {
+                class: OperationClass::OneWay(OneWayKind::Separate),
+                ..
+            }
+        ));
+        assert!(matches!(
+            registry.take_control(
+                control.kind(),
+                control.session_id(),
+                control.system_bytes(),
+            ),
+            ControlTakeDecision::Matched {
+                cancel_t6: Some(token),
+                ..
+            } if token == control_timer
+        ));
+        assert!(registry.reset_selected_session().is_empty());
+        assert_index_invariants(&registry);
+    }
+
+    /// Confirms reset keeps admission open for re-selection and later Data work.
+    #[test]
+    fn session_reset_supports_reselection_and_remains_distinct_from_close() {
+        let mut registry = registry(2, 8);
+        let first_request = reserve_request(&mut registry, 1);
+        let first_data = registry
+            .reserve_one_way(OperationId::new(2), OneWayKind::Data)
+            .expect("first-session Data lease");
+        assert_eq!(first_request.system_bytes().get(), 1);
+        assert_eq!(first_data.system_bytes().get(), 2);
+
+        assert_eq!(registry.reset_selected_session().into_operations().len(), 2);
+        assert!(!registry.is_closing());
+        let select = registry
+            .reserve_control(OperationId::new(3), ControlKind::Select, CONTROL_SESSION_ID)
+            .expect("re-selection control");
+        assert_eq!(select.system_bytes().get(), 3);
+        assert!(matches!(
+            registry.take_control(select.kind(), select.session_id(), select.system_bytes(),),
+            ControlTakeDecision::Matched { .. }
+        ));
+
+        let second_request = reserve_request(&mut registry, 4);
+        let second_data = registry
+            .reserve_one_way(OperationId::new(5), OneWayKind::Data)
+            .expect("second-session Data lease");
+        assert_eq!(second_request.system_bytes().get(), 4);
+        assert_eq!(second_data.system_bytes().get(), 5);
+        assert_eq!(registry.reset_selected_session().operations().len(), 2);
+        assert!(registry.reset_selected_session().is_empty());
+
+        let final_data = registry
+            .reserve_one_way(OperationId::new(6), OneWayKind::Data)
+            .expect("post-reset admission");
+        let close = registry.begin_close();
+        assert!(close.began_close());
+        assert_eq!(close.operations().len(), 1);
+        assert_eq!(
+            close.operations()[0].operation_id(),
+            final_data.operation_id()
+        );
+        assert!(registry.reset_selected_session().is_empty());
+        assert_eq!(
+            registry.reserve_one_way(OperationId::new(7), OneWayKind::Data),
+            Err(ReserveError::Closing)
+        );
+        assert_index_invariants(&registry);
+    }
+
     /// Confirms the first close drains all classes and later close calls are inert.
     #[test]
     fn begin_close_is_fenced_structured_and_idempotent() {
@@ -2513,7 +2990,11 @@ mod tests {
             .reserve_one_way(OperationId::new(2), OneWayKind::Data)
             .expect("one-way");
         let control = registry
-            .reserve_control(OperationId::new(3), ControlKind::Deselect)
+            .reserve_control(
+                OperationId::new(3),
+                ControlKind::Deselect,
+                CONTROL_SESSION_ID,
+            )
             .expect("control");
         registry.mark_visible(control.operation_id());
 
@@ -2556,7 +3037,11 @@ mod tests {
             }
         ));
         assert!(matches!(
-            registry.take_control(ControlKind::Deselect, control.system_bytes()),
+            registry.take_control(
+                ControlKind::Deselect,
+                CONTROL_SESSION_ID,
+                control.system_bytes(),
+            ),
             ControlTakeDecision::Tombstoned {
                 category: TombstoneCategory::ClosedAfterVisibility,
                 ..
@@ -2582,7 +3067,7 @@ mod tests {
             .reserve_one_way(OperationId::new(3), OneWayKind::Separate)
             .expect("one-way");
         let control = registry
-            .reserve_control(OperationId::new(4), ControlKind::Select)
+            .reserve_control(OperationId::new(4), ControlKind::Select, CONTROL_SESSION_ID)
             .expect("control");
         assert_index_invariants(&registry);
 
@@ -2594,7 +3079,11 @@ mod tests {
         registry.classify_inbound(exact_response(first));
         registry.finish_indeterminate(second.operation_id());
         registry.finish_one_way(one_way.operation_id());
-        registry.take_control(ControlKind::Select, control.system_bytes());
+        registry.take_control(
+            ControlKind::Select,
+            CONTROL_SESSION_ID,
+            control.system_bytes(),
+        );
         assert_index_invariants(&registry);
         assert_eq!(registry.tombstone_len(), 3);
     }
