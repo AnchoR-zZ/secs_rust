@@ -1,14 +1,12 @@
-//! Byte-preserving HSMS frame types shared by framing, validation, and Profile.
+//! Byte-preserving HSMS values at the framing and validation boundary.
 //!
-//! Raw values retain the exact ten header bytes. Validated values expose typed
-//! Data/control structure while keeping Message Text as opaque bytes so the
-//! Wire layer never depends on SECS-II.
+//! Raw frames retain the exact ten header bytes. Validated Data frames expose
+//! a semantic header while leaving Message Text opaque for the selected
+//! presentation profile.
 
 use bytes::Bytes;
 
-use crate::hsms::{
-    model::ids::SystemBytes, wire::validation::FrameViolation, Function, SessionId, Stream,
-};
+use crate::hsms::protocol::header::{ControlMessage, DataHeader};
 
 /// Number of bytes in every E37 HSMS message header.
 pub(crate) const HSMS_HEADER_LENGTH: usize = 10;
@@ -51,80 +49,20 @@ pub(crate) struct RawFrame {
     pub(crate) text: Bytes,
 }
 
-/// Structurally valid HSMS Data header.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DataHeader {
-    /// Validated Data-message Session ID.
-    pub(crate) session_id: SessionId,
-    /// Seven-bit stream value with the W-bit removed.
-    pub(crate) stream: Stream,
-    /// Eight-bit SECS function value.
-    pub(crate) function: Function,
-    /// W-bit indicating whether the Primary expects a Secondary.
-    pub(crate) reply_expected: bool,
-    /// Presentation Type retained for profile selection; HSMS-SS uses zero.
-    pub(crate) p_type: u8,
-    /// Four-byte transaction correlation value.
-    pub(crate) system_bytes: SystemBytes,
-}
-
-/// Structurally valid Data frame whose Message Text remains opaque to Wire.
+/// Structurally valid Data frame awaiting presentation-profile decoding.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DataFrame {
-    /// Validated Data-message header fields.
+pub(crate) struct WireDataFrame {
+    /// Validated semantic HSMS Data header.
     pub(crate) header: DataHeader,
-    /// Undecoded presentation-profile payload.
+    /// Opaque Message Text owned by the selected presentation profile.
     pub(crate) text: Bytes,
 }
 
-/// Known E37 control message types.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ControlType {
-    /// `Select.req` selection request.
-    SelectRequest,
-    /// `Select.rsp` selection response.
-    SelectResponse,
-    /// `Deselect.req` deselection request.
-    DeselectRequest,
-    /// `Deselect.rsp` deselection response.
-    DeselectResponse,
-    /// `Linktest.req` liveness probe.
-    LinktestRequest,
-    /// `Linktest.rsp` liveness response.
-    LinktestResponse,
-    /// `Reject.req` protocol rejection.
-    RejectRequest,
-    /// `Separate.req` unacknowledged separation request.
-    SeparateRequest,
-}
-
-/// Structurally valid control frame with its exact header preserved.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ControlFrame {
-    /// Original header used for status, reason, and rejection diagnostics.
-    pub(crate) raw_header: RawHeader,
-    /// Known E37 control-message classification.
-    pub(crate) control_type: ControlType,
-    /// Correlation value used by request/response control transactions.
-    pub(crate) system_bytes: SystemBytes,
-}
-
-/// Total output of structural frame classification.
+/// Successful output of strict structural frame validation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum InboundFrame {
-    /// Structurally valid Data frame awaiting presentation-profile decoding.
-    Data(DataFrame),
-    /// Structurally valid known control frame.
-    Control(ControlFrame),
-    /// Total structural-validation result retaining available raw context.
-    Violation(FrameViolation),
-}
-
-/// Wire-ready frame produced after any presentation-profile encoding.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OutboundFrame {
-    /// Data header and encoded Message Text.
-    Data(DataFrame),
-    /// Header-only E37 control message.
-    Control(ControlFrame),
+pub(crate) enum ValidatedFrame {
+    /// Data frame whose PType and SType are both the HSMS-SS value zero.
+    Data(WireDataFrame),
+    /// Header-only, structurally valid, typed E37 control message.
+    Control(ControlMessage),
 }

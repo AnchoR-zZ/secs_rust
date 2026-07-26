@@ -2,6 +2,7 @@
 
 mod admission;
 pub mod api;
+mod codec;
 pub mod config;
 mod core;
 pub mod error;
@@ -9,6 +10,7 @@ mod generation;
 pub mod lifecycle;
 mod model;
 mod profile;
+mod protocol;
 mod supervisor;
 mod wire;
 

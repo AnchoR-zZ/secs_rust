@@ -28,3 +28,5 @@ pub mod header;
 pub use decode::Secs2Decoder;
 pub use encode::encode_to_vec;
 pub use error::{DecodeError, EncodeError};
+
+pub(crate) use encode::EncodedItemPlan;

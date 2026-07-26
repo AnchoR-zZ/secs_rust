@@ -398,6 +398,87 @@ fn format_code_of(item: &SecsItem) -> FormatCode {
     }
 }
 
+/// Validated, exactly measured plan for appending one SECS-II item.
+///
+/// The plan borrows an immutable item tree, so its measured length cannot
+/// become stale between validation and writing. It lets enclosing protocols
+/// reserve one larger final buffer without first materializing a temporary
+/// SECS-II byte vector.
+#[derive(Debug)]
+pub(crate) struct EncodedItemPlan<'a> {
+    /// Immutable item tree validated by the measurement pass.
+    item: &'a SecsItem,
+    /// Exact number of bytes the item tree appends on success.
+    encoded_length: usize,
+}
+
+impl<'a> EncodedItemPlan<'a> {
+    /// Validates and measures `item`, returning a reusable append plan.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same E5 length or arithmetic errors as [`encode_to_vec`].
+    pub(crate) fn new(item: &'a SecsItem) -> Result<Self, EncodeError> {
+        Ok(Self {
+            item,
+            encoded_length: measure(item)?,
+        })
+    }
+
+    /// Returns the exact number of encoded bytes this plan will append.
+    pub(crate) const fn encoded_length(&self) -> usize {
+        self.encoded_length
+    }
+
+    /// Appends the measured item to an existing `output` vector.
+    ///
+    /// This method does not reserve capacity; callers composing a larger
+    /// protocol frame should reserve the complete final size first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`EncodeError`] if an internal item-length invariant fails
+    /// during the write pass. Because the borrowed item is immutable and was
+    /// already measured successfully, such a failure would indicate encoder
+    /// drift; callers should discard any partially built enclosing buffer.
+    pub(crate) fn write_into(&self, output: &mut Vec<u8>) -> Result<(), EncodeError> {
+        let start = output.len();
+        write_item_tree(self.item, output)?;
+        debug_assert_eq!(
+            output.len() - start,
+            self.encoded_length,
+            "encoder must append exactly the measured size"
+        );
+        Ok(())
+    }
+}
+
+/// Appends one complete item tree to `output` using an explicit-stack walk.
+///
+/// # Errors
+///
+/// Returns the first E5 length or arithmetic error observed while deriving
+/// node headers. A successfully created [`EncodedItemPlan`] has already ruled
+/// these errors out for its immutable tree.
+fn write_item_tree(item: &SecsItem, output: &mut Vec<u8>) -> Result<(), EncodeError> {
+    let mut walker = ItemWalker::new(item);
+    while let Some(node) = walker.next() {
+        let (declared_length, _) = declared_length_of(node)?;
+        let code = format_code_of(node);
+        let before = output.len();
+        write_header(output, code, declared_length);
+        if !matches!(node, SecsItem::List(_)) {
+            write_payload(output, node);
+            debug_assert_eq!(
+                output.len() - before - header_byte_count(declared_length),
+                declared_length,
+                "payload must emit exactly declared_length bytes"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Encodes `item` into a freshly allocated [`Vec<u8>`].
 ///
 /// After the measurement pass succeeds, the final output vector receives one
@@ -420,32 +501,10 @@ fn format_code_of(item: &SecsItem) -> FormatCode {
 /// List declares more than `0xFF_FFFF` direct children, or
 /// [`EncodeError::ArithmeticOverflow`] if internal size arithmetic overflows.
 pub fn encode_to_vec(item: &SecsItem) -> Result<Vec<u8>, EncodeError> {
-    let total = measure(item)?;
-    let mut dst = Vec::with_capacity(total);
-    let mut walker = ItemWalker::new(item);
-    while let Some(node) = walker.next() {
-        let (declared_length, _) = declared_length_of(node)?;
-        let code = format_code_of(node);
-        let before = dst.len();
-        write_header(&mut dst, code, declared_length);
-        if !matches!(node, SecsItem::List(_)) {
-            write_payload(&mut dst, node);
-            // Guard that the payload bytes written match the length advertised
-            // in the header; protects against the header and payload drifting
-            // out of sync.
-            debug_assert_eq!(
-                dst.len() - before - header_byte_count(declared_length),
-                declared_length,
-                "payload must emit exactly declared_length bytes"
-            );
-        }
-    }
-    debug_assert_eq!(
-        dst.len(),
-        total,
-        "encoder must produce exactly the measured size"
-    );
-    Ok(dst)
+    let plan = EncodedItemPlan::new(item)?;
+    let mut output = Vec::with_capacity(plan.encoded_length());
+    plan.write_into(&mut output)?;
+    Ok(output)
 }
 
 #[cfg(test)]

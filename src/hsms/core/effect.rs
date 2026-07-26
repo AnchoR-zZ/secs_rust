@@ -11,7 +11,7 @@ use crate::hsms::{
         ids::{OperationId, WireSequence},
         runtime::{GenerationCloseReason, TimerToken},
     },
-    profile::secs2::OutboundProtocolFrame,
+    protocol::message::ProtocolMessage,
     InboundPrimary, ProtocolNotice, SessionState,
 };
 
@@ -34,7 +34,7 @@ pub(crate) enum CoreEffect {
         /// Critical or Data scheduler lane required by the frame.
         class: WriteClass,
         /// Protocol frame to encode and enqueue without application mutation.
-        frame: OutboundProtocolFrame,
+        frame: ProtocolMessage,
     },
     /// Authorize the single writer to cross a previously reported write fence.
     ProceedWrite {

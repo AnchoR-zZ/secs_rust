@@ -9,7 +9,7 @@ use crate::hsms::{
         ids::{OperationId, WireSequence},
         runtime::{TimerToken, TransportFault, WriteResult},
     },
-    profile::secs2::InboundProtocolFrame,
+    protocol::{message::ProtocolMessage, violation::InboundViolation},
 };
 
 /// Every input that may advance one generation-scoped `HsmsCore`.
@@ -17,8 +17,10 @@ use crate::hsms::{
 pub(crate) enum CoreEvent {
     /// An application command passed all-or-nothing admission.
     Command(ProtocolCommand),
-    /// Wire validation and presentation-profile decoding produced an inbound frame.
-    FrameReceived(InboundProtocolFrame),
+    /// Wire validation and presentation-profile decoding produced a message.
+    MessageReceived(ProtocolMessage),
+    /// A recoverable header or Message Text failure requires a Core decision.
+    InboundViolation(InboundViolation),
     /// The single writer reached the pre-write fence for one scheduled operation.
     BeginWrite {
         /// Core operation that owns the scheduled frame.
