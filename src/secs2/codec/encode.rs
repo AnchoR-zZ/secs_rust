@@ -33,7 +33,7 @@ use crate::secs2::{
 
 /// Iterative preorder walker over a [`SecsItem`] tree.
 ///
-/// Each open List contributes one [`slice::Iter`] to `parents`, so a wide
+/// Each open List contributes one [`std::slice::Iter`] to `parents`, so a wide
 /// List never pushes all of its child references onto the host stack. The
 /// walker is consumed by repeatedly calling [`ItemWalker::next`], which
 /// returns the items in the same order a recursive preorder visit would
