@@ -11,6 +11,5 @@ mod fsm;
 pub(crate) use fsm::{
     CloseBarrier, ControlAction, ControlDecision, ControlFsm, ControlInvariantError,
     ControlTimeoutDecision, LocalControlPlan, LocalResponseDecision, MatchedControlResponse,
-    OverlayTerminalDecision, PeerRequestDecision, PeerResponseCommit, PeerResponsePlan,
-    SelectionOverlay,
+    OverlayTerminalDecision, PeerRequestDecision, PeerResponsePlan, SelectionOverlay,
 };

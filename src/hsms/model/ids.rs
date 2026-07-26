@@ -1,7 +1,10 @@
 //! Strongly typed identifiers used to correlate asynchronous HSMS work.
 //!
 //! Public identifiers expose read-only values, while allocation remains inside
-//! the owning endpoint, supervisor, Core, or generation runtime.
+//! the owning endpoint, supervisor, Core, or generation runtime. Generation-
+//! local allocators advance monotonically, permit diagnostic gaps after failed
+//! admission, never wrap, and permanently stop allocating a kind at `u64`
+//! exhaustion.
 
 use std::fmt;
 
@@ -138,11 +141,15 @@ internal_id!(
 );
 internal_id!(
     OperationId,
-    "Identifies one application-requested or autonomous operation allocated and managed by Core."
+    "Identifies one application-requested or autonomous Core operation. \
+     `HsmsCore` allocates it once per accepted operation; applications cannot \
+     supply it and the value is never reused within a connection generation."
 );
 internal_id!(
     WriteId,
-    "Identifies one outbound write independently of its owning Core operation."
+    "Identifies one outbound frame independently of its owning operation. \
+     `HsmsCore` allocates it before requesting scheduling and never reuses it \
+     within a connection generation."
 );
 internal_id!(
     DeliveryId,
@@ -158,7 +165,9 @@ internal_id!(
 );
 internal_id!(
     WireSequence,
-    "Identifies one frame position in generation-local wire order."
+    "Identifies one frame position in generation-local wire order. \
+     `WireScheduler` assigns it only after accepting a scheduling request and \
+     never reuses it within the connection generation."
 );
 internal_id!(
     LifecycleSequence,

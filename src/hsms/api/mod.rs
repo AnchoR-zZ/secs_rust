@@ -1,21 +1,16 @@
-//! Application-facing messages and endpoint boundary values.
+//! Public application facade for neutral HSMS boundary contracts.
 //!
 //! `HsmsHandle` and `HsmsRuntime` are implemented in Wave 2A after admission
 //! and lifecycle semantics are available.
 
-pub(crate) mod command;
-pub(crate) mod completion;
-mod event;
-mod message;
+mod reply;
 
-pub use command::ControlIntent;
-pub use completion::SendReceipt;
-pub use event::{ConnectionCloseReason, EndpointEvent, EndpointEventEnvelope, ProtocolNotice};
-pub use message::{
-    DataEventToken, InboundPrimary, InboundToken, PrimaryMessage, ReplyToken, SecondaryMessage,
+pub use crate::hsms::contracts::{
+    ConnectionCloseReason, EndpointEvent, EndpointEventEnvelope, PeerRejectDisposition,
+    PeerRejectNotice, ProtocolNotice, SendReceipt,
 };
-
-pub(crate) use command::ProtocolCommand;
-/// Crate-only completion seam shared by Core and its runtime result router.
-#[allow(unused_imports)]
-pub(crate) use completion::{CommandCompletion, CompletionValue};
+pub use crate::hsms::contracts::{
+    ControlIntent, DataEventToken, InboundPrimary, InboundToken, PrimaryMessage, ReplyToken,
+    SecondaryMessage,
+};
+pub use reply::{ReplyAdmissionError, ReplyAdmissionReason, ReplyIntent};

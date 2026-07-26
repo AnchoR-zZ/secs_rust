@@ -4,6 +4,7 @@ mod admission;
 pub mod api;
 mod codec;
 pub mod config;
+mod contracts;
 mod core;
 pub mod error;
 mod generation;
@@ -16,8 +17,9 @@ mod wire;
 
 pub use api::{
     ConnectionCloseReason, ControlIntent, DataEventToken, EndpointEvent, EndpointEventEnvelope,
-    InboundPrimary, InboundToken, PrimaryMessage, ProtocolNotice, ReplyToken, SecondaryMessage,
-    SendReceipt,
+    InboundPrimary, InboundToken, PeerRejectDisposition, PeerRejectNotice, PrimaryMessage,
+    ProtocolNotice, ReplyAdmissionError, ReplyAdmissionReason, ReplyIntent, ReplyToken,
+    SecondaryMessage, SendReceipt,
 };
 pub use config::{ConnectionMode, EndpointConfig, EndpointLimits, HsmsTimeouts};
 pub use error::{ConfigError, IdentifierError, OperationError, ProtocolError, TimeoutKind};
@@ -25,3 +27,4 @@ pub use lifecycle::{
     EndpointPhase, EndpointStateSnapshot, GenerationSlotSnapshot, RunningIntent, SessionState,
 };
 pub use model::ids::{ConnectionGeneration, Function, SessionId, Stream};
+pub use protocol::header::RejectReason;

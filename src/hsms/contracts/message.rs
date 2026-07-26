@@ -1,4 +1,4 @@
-//! Application-facing SECS message values and inbound reply capabilities.
+//! Defines immutable application message values and inbound reply capabilities.
 //!
 //! Applications provide only stream, function, and optional SECS-II body.
 //! Session IDs, W-bit policy, System Bytes, and inbound classification remain
@@ -9,10 +9,7 @@
 use std::fmt;
 
 use crate::{
-    hsms::{
-        model::ids::{ReplyCapabilityId, SystemBytes},
-        ConnectionGeneration, Function, SessionId, Stream,
-    },
+    hsms::model::ids::{ConnectionGeneration, Function, ReplyCapabilityId, Stream},
     secs2::SecsItem,
 };
 
@@ -117,44 +114,32 @@ impl SecondaryMessage {
     }
 }
 
-/// Single-use capability for replying to an inbound W=1 primary.
+/// Single-use capability for responding to an inbound W=1 Primary.
+#[must_use = "reply, abort, or explicitly abandon this inbound reply capability"]
 pub struct ReplyToken {
     /// Opaque identity used to consume this reply authority exactly once.
     capability_id: ReplyCapabilityId,
     /// TCP incarnation on which the inbound primary was received.
     generation: ConnectionGeneration,
-    /// Session ID that the generated Secondary must preserve.
-    session_id: SessionId,
-    /// Stream number that the generated Secondary must preserve.
-    stream: Stream,
-    /// Function number the generated Secondary must use.
-    reply_function: Function,
-    /// System Bytes that correlate the Secondary to its inbound Primary.
-    system_bytes: SystemBytes,
+    /// Private admission hint; the Core ledger remains authoritative.
+    normal_secondary_available: bool,
 }
 
 impl ReplyToken {
     /// Creates the single-use reply authority identified by `capability_id`.
     ///
-    /// `generation`, `session_id`, `stream`, `reply_function`, and
-    /// `system_bytes` are preserved from the inbound primary or derived by the
-    /// Core. This crate-private constructor prevents applications from forging
-    /// transaction metadata.
+    /// `normal_secondary_available` lets admission return an abort-only token
+    /// before ownership transfer. The Core ledger validates the mode again;
+    /// header correlation remains exclusively in that ledger.
     pub(crate) const fn new(
         capability_id: ReplyCapabilityId,
         generation: ConnectionGeneration,
-        session_id: SessionId,
-        stream: Stream,
-        reply_function: Function,
-        system_bytes: SystemBytes,
+        normal_secondary_available: bool,
     ) -> Self {
         Self {
             capability_id,
             generation,
-            session_id,
-            stream,
-            reply_function,
-            system_bytes,
+            normal_secondary_available,
         }
     }
 
@@ -168,24 +153,13 @@ impl ReplyToken {
         self.generation
     }
 
-    /// Returns the Session ID that the Secondary must preserve.
-    pub(crate) const fn session_id(&self) -> SessionId {
-        self.session_id
-    }
-
-    /// Returns the stream number that the Secondary must preserve.
-    pub(crate) const fn stream(&self) -> Stream {
-        self.stream
-    }
-
-    /// Returns the function number selected for the Secondary.
-    pub(crate) const fn reply_function(&self) -> Function {
-        self.reply_function
-    }
-
-    /// Returns the internal System Bytes correlation value.
-    pub(crate) const fn system_bytes(&self) -> SystemBytes {
-        self.system_bytes
+    /// Returns the private pre-Core admission hint for a normal Secondary.
+    ///
+    /// This hint is deliberately crate-private: applications receive opaque
+    /// authority and choose reply, abort, or abandon without observing Core's
+    /// authoritative reply-contract classification.
+    pub(crate) const fn normal_secondary_available(&self) -> bool {
+        self.normal_secondary_available
     }
 }
 
@@ -275,7 +249,9 @@ impl InboundPrimary {
 
 #[cfg(test)]
 mod tests {
-    use super::DataEventToken;
+    use crate::hsms::model::ids::{ConnectionGeneration, ReplyCapabilityId};
+
+    use super::{DataEventToken, ReplyToken};
 
     /// Verifies that the public marker's debug form exposes no private state.
     #[test]
@@ -283,5 +259,22 @@ mod tests {
         let token = DataEventToken::new();
 
         assert_eq!(format!("{token:?}"), "DataEventToken { .. }");
+    }
+
+    /// Confirms public token diagnostics expose only generation while keeping
+    /// capability identity and private reply-contract hints hidden.
+    #[test]
+    fn reply_token_debug_hides_capability_identity() {
+        let token = ReplyToken::new(
+            ReplyCapabilityId::new(123_456),
+            ConnectionGeneration::new(7),
+            false,
+        );
+        let debug = format!("{token:?}");
+
+        assert!(!token.normal_secondary_available());
+        assert!(debug.contains("generation"));
+        assert!(!debug.contains("normal_secondary_available"));
+        assert!(!debug.contains("123456"));
     }
 }

@@ -7,7 +7,10 @@ use std::num::NonZeroU8;
 
 use thiserror::Error;
 
-use crate::{hsms::model::ids::Function, secs2::SecsItemError};
+use crate::{
+    hsms::{model::ids::Function, protocol::header::RejectReason},
+    secs2::SecsItemError,
+};
 
 /// Invalid protocol identifier values.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -38,6 +41,13 @@ pub enum ConfigError {
     #[error("capacity `{field}` must be greater than zero")]
     ZeroCapacity {
         /// Name of the invalid capacity field.
+        field: &'static str,
+    },
+
+    /// Checked arithmetic overflowed while deriving a composite capacity.
+    #[error("configured capacities overflow while deriving `{field}`")]
+    DerivedCapacityOverflow {
+        /// Name of the derived capacity that could not be represented.
         field: &'static str,
     },
 
@@ -171,11 +181,15 @@ pub enum OperationError {
     #[error("reply capability is unavailable")]
     ReplyCapabilityUnavailable,
 
+    /// A normal Secondary was requested for an abort-only reply capability.
+    #[error("this inbound Primary cannot form an F+1 Secondary; use abort_reply or abandon_reply")]
+    ReplyRequiresAbort,
+
     /// The peer sent `Reject.req` for work associated with this operation.
     #[error("peer rejected the operation with E37 reason {reason}")]
     PeerRejected {
         /// Exact non-zero E37 Reject reason, including extension values.
-        reason: NonZeroU8,
+        reason: RejectReason,
     },
 
     /// The operation exceeded the named protocol or runtime deadline.
@@ -203,6 +217,8 @@ pub enum OperationError {
 mod tests {
     use std::num::NonZeroU8;
 
+    use crate::hsms::RejectReason;
+
     use super::OperationError;
 
     /// Confirms session-state and control-slot precondition failures expose
@@ -221,6 +237,10 @@ mod tests {
             OperationError::ControlBusy.to_string(),
             "another transactional HSMS control procedure is already in progress"
         );
+        assert_eq!(
+            OperationError::ReplyRequiresAbort.to_string(),
+            "this inbound Primary cannot form an F+1 Secondary; use abort_reply or abandon_reply"
+        );
     }
 
     /// Confirms all public peer-rejection errors require non-zero wire values
@@ -229,7 +249,7 @@ mod tests {
     fn peer_rejection_errors_preserve_non_zero_wire_values() {
         let select_status = NonZeroU8::new(2).expect("non-zero Select status");
         let deselect_status = NonZeroU8::new(1).expect("non-zero Deselect status");
-        let reject_reason = NonZeroU8::new(4).expect("non-zero Reject reason");
+        let reject_reason = RejectReason::ENTITY_NOT_SELECTED;
 
         assert_eq!(
             OperationError::SelectRejected {

@@ -4,7 +4,7 @@
 //! SECS-II item model. Wire can therefore validate and encode HSMS headers
 //! without acquiring a presentation-profile dependency.
 
-use std::num::NonZeroU8;
+use std::{fmt, num::NonZeroU8};
 
 use crate::hsms::model::ids::{Function, SessionId, Stream, SystemBytes};
 
@@ -154,21 +154,21 @@ impl DeselectStatus {
 }
 
 /// Non-zero E37 `Reject.req` reason byte.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RejectReason(
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RejectReason(
     /// Validated non-zero rejection reason.
     NonZeroU8,
 );
 
 impl RejectReason {
     /// E37 reason 1: the received SType is not supported.
-    pub(crate) const UNSUPPORTED_STYPE: Self = Self::from_non_zero_literal(1);
+    pub const UNSUPPORTED_STYPE: Self = Self::from_non_zero_literal(1);
     /// E37 reason 2: the received PType is not supported.
-    pub(crate) const UNSUPPORTED_PTYPE: Self = Self::from_non_zero_literal(2);
+    pub const UNSUPPORTED_PTYPE: Self = Self::from_non_zero_literal(2);
     /// E37 reason 3: no open transaction matches the received message.
-    pub(crate) const TRANSACTION_NOT_OPEN: Self = Self::from_non_zero_literal(3);
+    pub const TRANSACTION_NOT_OPEN: Self = Self::from_non_zero_literal(3);
     /// E37 reason 4: the HSMS entity is not selected.
-    pub(crate) const ENTITY_NOT_SELECTED: Self = Self::from_non_zero_literal(4);
+    pub const ENTITY_NOT_SELECTED: Self = Self::from_non_zero_literal(4);
 
     /// Validates `value` as an E37 rejection reason.
     ///
@@ -176,7 +176,7 @@ impl RejectReason {
     /// validator classifies as an invalid control header. Every non-zero raw
     /// value is preserved so subsidiary standards and local implementations
     /// can define additional reasons.
-    pub(crate) const fn new(value: u8) -> Option<Self> {
+    pub const fn new(value: u8) -> Option<Self> {
         match NonZeroU8::new(value) {
             Some(value) => Some(Self(value)),
             None => None,
@@ -184,7 +184,7 @@ impl RejectReason {
     }
 
     /// Returns the exact non-zero reason byte.
-    pub(crate) const fn get(self) -> u8 {
+    pub const fn get(self) -> u8 {
         self.0.get()
     }
 
@@ -192,7 +192,7 @@ impl RejectReason {
     ///
     /// A `false` result denotes a preserved extension value, not an invalid
     /// reason.
-    pub(crate) const fn is_base_standard(self) -> bool {
+    pub const fn is_base_standard(self) -> bool {
         self.get() <= Self::ENTITY_NOT_SELECTED.get()
     }
 
@@ -202,6 +202,13 @@ impl RejectReason {
             Some(value) => Self(value),
             None => panic!("RejectReason named constants must be non-zero"),
         }
+    }
+}
+
+impl fmt::Display for RejectReason {
+    /// Formats the exact non-zero E37 rejection reason byte.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.get().fmt(formatter)
     }
 }
 

@@ -8,8 +8,8 @@
 use std::num::NonZeroU8;
 
 use crate::hsms::{
-    api::ControlIntent,
-    core::{effect::DataGateState, transaction::ControlKind},
+    contracts::{ControlIntent, DataGateState, PeerResponseCommit},
+    core::transaction::ControlKind,
     model::{
         ids::{OperationId, SystemBytes},
         runtime::{CommunicationsTimeoutKind, GenerationCloseReason, TimerToken},
@@ -67,9 +67,12 @@ impl LocalControlPlan {
 pub(crate) enum CloseBarrier {
     /// Transport closure may start as soon as Core applies the decision.
     Immediate,
-    /// Transport closure waits for one operation's terminal write outcome.
+    /// Core must resolve this semantic operation to its exact active `WriteId`
+    /// before Drain starts; only that write's scheduler/writer terminal outcome
+    /// may release transport close.
     AfterOperation(
-        /// Operation whose terminal result releases the close barrier.
+        /// Semantic operation whose exact active write must replace this
+        /// placeholder; operation completion never releases the barrier.
         OperationId,
     ),
 }
@@ -82,7 +85,9 @@ pub(crate) enum ControlAction {
         /// Gate state that must take effect before the following action.
         DataGateState,
     ),
-    /// Remove selected-session Data work without closing Registry admission.
+    /// Atomically remove selected-session Data work, inbound reply
+    /// capabilities, and their pending deliveries without closing
+    /// generation-wide admission, so the same TCP connection may reselect.
     ResetSelectedSession,
     /// Publish one stable selection-state transition.
     SessionStateChanged(
@@ -237,18 +242,6 @@ impl LocalResponseDecision {
     pub(crate) fn into_ordered_parts(self) -> (ControlDecision, Result<(), OperationError>) {
         (self.state, self.result)
     }
-}
-
-/// Effect to commit only when a scheduled peer response reaches BeginWrite.
-#[must_use = "peer response commit tokens must be retained through BeginWrite"]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PeerResponseCommit {
-    /// The response fence carries no stable selection transition.
-    None,
-    /// A successful `Select.rsp` fence may commit selection.
-    SelectAccepted,
-    /// A successful `Deselect.rsp` fence commits the accepted peer downgrade.
-    DeselectAccepted,
 }
 
 /// Peer response plus the state work split across receipt and BeginWrite.
@@ -494,10 +487,14 @@ impl ControlFsm {
         Ok(plan)
     }
 
-    /// Commits a plan only after Core successfully reserves its Registry entry.
+    /// Commits a plan only after Core successfully reserves every required
+    /// operation, Registry, and write resource.
     ///
     /// `operation_id` is allocated by Core. Invalid or replayed commits return
     /// a structured invariant error without partially replacing an overlay.
+    /// For local Separate, Core must resolve the returned semantic
+    /// [`CloseBarrier::AfterOperation`] to its exact active write before
+    /// beginning Drain; a failed translation is an internal invariant failure.
     pub(crate) fn commit_local_started(
         &mut self,
         operation_id: OperationId,
@@ -980,11 +977,11 @@ mod tests {
     use super::{
         CloseBarrier, ControlAction, ControlDecision, ControlFsm, ControlInvariantError,
         LocalControlPlan, MatchedControlResponse, OverlayTerminalDecision, PeerRequestDecision,
-        PeerResponseCommit, PeerResponsePlan, SelectionOverlay,
+        PeerResponsePlan, SelectionOverlay,
     };
     use crate::hsms::{
-        api::ControlIntent,
-        core::{effect::DataGateState, transaction::ControlKind},
+        contracts::{ControlIntent, DataGateState, PeerResponseCommit},
+        core::transaction::ControlKind,
         model::{
             ids::{OperationId, SystemBytes, TimerId},
             runtime::{CommunicationsTimeoutKind, GenerationCloseReason, TimerToken},

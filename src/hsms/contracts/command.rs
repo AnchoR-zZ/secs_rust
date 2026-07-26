@@ -1,4 +1,4 @@
-//! Typed protocol commands accepted by endpoint admission and submitted to Core.
+//! Defines typed application intents and generation-scoped Core commands.
 //!
 //! Every command carries the application command identity used for exactly-once
 //! completion. `HsmsCore` allocates the separate operation identity only after
@@ -8,7 +8,7 @@
 
 use crate::{hsms::model::ids::CommandId, secs2::SecsItem};
 
-use super::{PrimaryMessage, ReplyToken};
+use super::message::{PrimaryMessage, ReplyToken};
 
 /// Typed control-plane intent. Applications cannot construct raw control
 /// headers or choose System Bytes.
@@ -28,7 +28,7 @@ pub enum ControlIntent {
 
 /// Generation-scoped command vocabulary consumed by `HsmsCore`.
 #[derive(Debug)]
-pub(crate) enum ProtocolCommand {
+pub(crate) enum CoreCommand {
     /// Write a W=0 Primary and complete after the frame is committed locally.
     Send {
         /// Application command whose completion must be delivered exactly once.
@@ -43,14 +43,28 @@ pub(crate) enum ProtocolCommand {
         /// Application-provided primary content; the Core supplies W=1 metadata.
         message: PrimaryMessage,
     },
-    /// Consume an inbound reply capability and send its Secondary body.
+    /// Consume a normal-mode inbound capability and send its F+1 Secondary.
     Reply {
         /// Application command completed when the Secondary frame commits.
         command_id: CommandId,
-        /// Single-use authority containing generation and transaction metadata.
+        /// Single-use authority identifying the inbound W=1 Primary.
         token: ReplyToken,
         /// Optional Secondary Message Text supplied by the application.
         body: Option<SecsItem>,
+    },
+    /// Consume an inbound reply capability and send a header-only SxF0 abort.
+    AbortReply {
+        /// Application command completed when the abort frame commits.
+        command_id: CommandId,
+        /// Single-use authority identifying the inbound W=1 Primary.
+        token: ReplyToken,
+    },
+    /// Consume an inbound reply capability without writing a protocol frame.
+    AbandonReply {
+        /// Application command completed when Core commits local abandonment.
+        command_id: CommandId,
+        /// Single-use authority released without a peer-visible response.
+        token: ReplyToken,
     },
     /// Execute a typed HSMS control-plane operation.
     Control {

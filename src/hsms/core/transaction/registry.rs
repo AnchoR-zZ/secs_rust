@@ -90,12 +90,13 @@ pub(crate) enum OperationClass {
     Control(ControlKind),
 }
 
-/// Strongest evidence currently held about peer visibility of an outbound frame.
+/// Strongest conservative evidence held about possible peer visibility.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OperationVisibility {
-    /// No event has indicated that any frame byte could be peer-visible.
+    /// Core has not authorized the writer to make any frame byte visible.
     NotVisible,
-    /// At least one byte may be visible, but complete delivery is not proven.
+    /// Core authorized Proceed, so bytes may become visible before a later
+    /// runtime observation or serialized Core input.
     MayBeVisible,
     /// The complete frame reached the local ordered writer commit point.
     Committed,
@@ -131,6 +132,8 @@ pub(crate) enum TombstoneCategory {
     ControlResponseMatched,
     /// The exact committed control request exceeded T6.
     ControlExpired,
+    /// An exact peer Reject terminated a possibly visible outbound operation.
+    PeerRejected,
 }
 
 /// Whether a frame matching terminal correlation memory is repeated or late.
@@ -452,6 +455,15 @@ pub(crate) enum InboundDataDecision {
         /// Request visibility when the abort won the serialized race.
         visibility: OperationVisibility,
     },
+    /// An exact response or abort arrived before Core authorized its request write.
+    Premature {
+        /// Live request that remains reserved after the premature arrival.
+        operation_id: OperationId,
+        /// Original semantic message retained for a Core diagnostic.
+        message: DataMessage,
+        /// Exact matcher result that would become terminal after writer authorization.
+        matched: PrematureDataMatch,
+    },
     /// Exact response or abort matched retained terminal correlation memory.
     Tombstoned {
         /// Original operation associated with the tombstone.
@@ -475,6 +487,15 @@ pub(crate) enum InboundDataDecision {
         /// Original orphaned message retained for a Core diagnostic.
         message: DataMessage,
     },
+}
+
+/// Exact Data form observed before its live request became possibly visible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrematureDataMatch {
+    /// A valid F+1 Secondary arrived before local writer authorization.
+    Secondary,
+    /// A valid same-transaction SxF0 arrived before local writer authorization.
+    Abort,
 }
 
 /// Owner that rejected an inbound control response without being consumed.
@@ -519,6 +540,13 @@ pub(crate) enum ControlTakeDecision {
         /// Visibility state when the response won the serialized race.
         visibility: OperationVisibility,
     },
+    /// An exact response arrived before Core authorized its request write.
+    Premature {
+        /// Live control operation retained without mutation.
+        operation_id: OperationId,
+        /// Exact response correlation observed too early.
+        correlation: ControlCorrelation,
+    },
     /// Exact kind, Session ID, and System Bytes matched a control tombstone.
     Tombstoned {
         /// Original operation associated with the tombstone.
@@ -537,6 +565,43 @@ pub(crate) enum ControlTakeDecision {
     },
     /// No live control or same-System-Bytes tombstone exists.
     NoPending,
+}
+
+/// Result of owner-targeted termination by one exact peer Reject.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PeerRejectFinishDecision {
+    /// The exact visible operation was removed and tombstoned.
+    Finished {
+        /// Operation terminated by the peer Reject.
+        operation_id: OperationId,
+        /// System Bytes retained by the mandatory tombstone.
+        system_bytes: SystemBytes,
+        /// Exact registry ownership class that was terminated.
+        class: OperationClass,
+        /// Strongest visibility evidence retained at termination.
+        visibility: OperationVisibility,
+        /// Exact pending T3 or T6 timer Core must cancel, if present.
+        cancel_timer: Option<TimerToken>,
+    },
+    /// The operation already reached a retained terminal state.
+    AlreadyTerminal {
+        /// Retained terminal category that prevented duplicate mutation.
+        category: TombstoneCategory,
+    },
+    /// The live operation has not yet been authorized for peer visibility.
+    NotVisible {
+        /// Exact live class retained without mutation.
+        class: OperationClass,
+    },
+    /// The caller's independently attributed class did not match registry ownership.
+    ClassMismatch {
+        /// Class required by the caller's Reject attribution.
+        expected: OperationClass,
+        /// Actual live class retained without mutation.
+        actual: OperationClass,
+    },
+    /// No live or retained operation uses the supplied owner identity.
+    UnknownOperation,
 }
 
 /// One live operation removed by a lifecycle boundary.
@@ -807,7 +872,9 @@ impl TransactionRegistry {
     /// `request_capacity` limits only W=1 Data requests. One-way leases use no
     /// request slot, transactional control has one independent slot, and
     /// `tombstone_capacity` bounds a separate FIFO. Zero capacities return a
-    /// structured construction error.
+    /// structured construction error. Both values are logical bounds; backing
+    /// collections allocate lazily so even a very large valid bound cannot
+    /// force construction-time allocation or panic.
     pub(crate) fn new(
         generation: ConnectionGeneration,
         request_capacity: usize,
@@ -826,13 +893,13 @@ impl TransactionRegistry {
             request_capacity,
             tombstone_capacity,
             closing: false,
-            requests: HashMap::with_capacity(request_capacity),
+            requests: HashMap::new(),
             one_way: HashMap::new(),
             control: None,
             operations: HashMap::new(),
             timers: HashMap::new(),
-            tombstone_order: VecDeque::with_capacity(tombstone_capacity),
-            tombstones: HashMap::with_capacity(tombstone_capacity),
+            tombstone_order: VecDeque::new(),
+            tombstones: HashMap::new(),
         })
     }
 
@@ -981,9 +1048,12 @@ impl TransactionRegistry {
         })
     }
 
-    /// Records that at least one byte of a live operation may be peer-visible.
+    /// Conservatively records that a live operation may become peer-visible.
     ///
-    /// Terminal, duplicate, and unknown notifications never recreate state.
+    /// Core calls this after validating an exact BeginWrite fence and before
+    /// emitting ProceedWrite. A later exact WriteMayBeVisible event may repeat
+    /// the transition as an idempotent confirmation. Terminal, duplicate, and
+    /// unknown notifications never recreate operation state.
     pub(crate) fn mark_visible(&mut self, operation_id: OperationId) -> MarkVisibleDecision {
         let Some(locator) = self.operations.get(&operation_id).copied() else {
             return self
@@ -1136,6 +1206,54 @@ impl TransactionRegistry {
         Self::finish_decision(removed, Some(category))
     }
 
+    /// Terminates one exactly attributed, possibly visible operation after peer Reject.
+    ///
+    /// `operation_id` selects the Core-owned outbound operation and
+    /// `expected_class` independently confirms that Reject attribution did not
+    /// cross request, one-way, or control ownership. Only `MayBeVisible` or
+    /// `Committed` operations can be peer-rejected. Every successful removal
+    /// creates a [`TombstoneCategory::PeerRejected`] tombstone and returns the
+    /// exact timer Core must cancel. Unknown, terminal, never-visible, and
+    /// class-mismatched calls leave all live stores and indexes unchanged.
+    /// The Reject reason intentionally remains owned by the surrounding Core
+    /// use case and Operation ledger; this registry neither stores nor
+    /// duplicates that semantic completion payload.
+    pub(crate) fn finish_peer_rejected(
+        &mut self,
+        operation_id: OperationId,
+        expected_class: OperationClass,
+    ) -> PeerRejectFinishDecision {
+        let Some(locator) = self.operations.get(&operation_id).copied() else {
+            return self
+                .terminal_category_for_operation(operation_id)
+                .map_or(PeerRejectFinishDecision::UnknownOperation, |category| {
+                    PeerRejectFinishDecision::AlreadyTerminal { category }
+                });
+        };
+        let actual = locator.class();
+        if actual != expected_class {
+            return PeerRejectFinishDecision::ClassMismatch {
+                expected: expected_class,
+                actual,
+            };
+        }
+        if self.visibility(locator) == OperationVisibility::NotVisible {
+            return PeerRejectFinishDecision::NotVisible { class: actual };
+        }
+
+        let removed = self
+            .remove_live_operation(operation_id)
+            .expect("peer Reject target was located immediately before removal");
+        self.insert_tombstone(removed, TombstoneCategory::PeerRejected);
+        PeerRejectFinishDecision::Finished {
+            operation_id: removed.operation_id,
+            system_bytes: removed.system_bytes,
+            class: removed.class,
+            visibility: removed.visibility,
+            cancel_timer: removed.timer,
+        }
+    }
+
     /// Classifies one inbound Data message and atomically consumes exact live matches.
     ///
     /// Odd functions are always Primary candidates. Even functions and F0 can
@@ -1151,7 +1269,23 @@ impl TransactionRegistry {
 
         let system_bytes = header.system_bytes();
         if let Some(request) = self.requests.get(&system_bytes).copied() {
-            return match request.matcher.classify(header, has_message_text) {
+            let matched = request.matcher.classify(header, has_message_text);
+            if request.visibility == OperationVisibility::NotVisible {
+                let premature = match matched {
+                    MatcherDecision::Secondary => Some(PrematureDataMatch::Secondary),
+                    MatcherDecision::Abort => Some(PrematureDataMatch::Abort),
+                    MatcherDecision::Mismatch { .. } => None,
+                };
+                if let Some(matched) = premature {
+                    return InboundDataDecision::Premature {
+                        operation_id: request.operation_id,
+                        message,
+                        matched,
+                    };
+                }
+            }
+
+            return match matched {
                 MatcherDecision::Secondary => {
                     let removed = self
                         .remove_live_operation(request.operation_id)
@@ -1250,14 +1384,14 @@ impl TransactionRegistry {
         system_bytes: SystemBytes,
     ) -> ControlTakeDecision {
         let actual = ControlCorrelation::new(kind, session_id, system_bytes);
-        if self
-            .control
-            .is_some_and(|entry| entry.correlation == actual)
-        {
-            let operation_id = self
-                .control
-                .expect("exact control checked above")
-                .operation_id;
+        if let Some(entry) = self.control.filter(|entry| entry.correlation == actual) {
+            if entry.visibility == OperationVisibility::NotVisible {
+                return ControlTakeDecision::Premature {
+                    operation_id: entry.operation_id,
+                    correlation: actual,
+                };
+            }
+            let operation_id = entry.operation_id;
             let removed = self
                 .remove_live_operation(operation_id)
                 .expect("live control slot must be removable");
@@ -2002,6 +2136,23 @@ mod tests {
         ));
     }
 
+    /// Confirms extreme logical bounds do not trigger eager allocation or a panic.
+    #[test]
+    fn construction_with_extreme_capacities_is_lazy_and_empty() {
+        let registry =
+            TransactionRegistry::new(ConnectionGeneration::new(1), usize::MAX, usize::MAX)
+                .expect("extreme non-zero capacities remain valid logical bounds");
+
+        assert_eq!(registry.request_len(), 0);
+        assert_eq!(registry.one_way_len(), 0);
+        assert!(!registry.has_control());
+        assert_eq!(registry.tombstone_len(), 0);
+        assert!(registry.operations.is_empty());
+        assert!(registry.timers.is_empty());
+        assert!(registry.tombstone_order.is_empty());
+        assert_index_invariants(&registry);
+    }
+
     /// Confirms invalid function and full-capacity failures do not advance allocation.
     #[test]
     fn request_reservation_failures_are_atomic() {
@@ -2110,11 +2261,12 @@ mod tests {
         assert_index_invariants(&registry);
     }
 
-    /// Confirms an exact response can terminate before commit and suppress later T3.
+    /// Confirms an exact visible response can terminate before commit and suppress later T3.
     #[test]
     fn fast_response_is_terminal_before_write_commit() {
         let mut registry = registry(1, 4);
         let request = reserve_request(&mut registry, 1);
+        registry.mark_visible(request.operation_id());
 
         let decision = registry.classify_inbound(exact_response(request));
         assert!(matches!(
@@ -2122,7 +2274,7 @@ mod tests {
             InboundDataDecision::MatchedSecondary {
                 operation_id,
                 cancel_t3: None,
-                visibility: OperationVisibility::NotVisible,
+                visibility: OperationVisibility::MayBeVisible,
                 ..
             } if operation_id == request.operation_id()
         ));
@@ -2134,6 +2286,44 @@ mod tests {
         );
         assert!(registry.timers.is_empty());
         assert_eq!(registry.request_len(), 0);
+        assert_index_invariants(&registry);
+    }
+
+    /// Confirms exact Secondary and F0 arrivals before Proceed retain the live request.
+    #[test]
+    fn pre_proceed_secondary_and_abort_are_premature_without_mutation() {
+        let mut registry = registry(1, 4);
+        let request = reserve_request(&mut registry, 1);
+
+        assert!(matches!(
+            registry.classify_inbound(exact_response(request)),
+            InboundDataDecision::Premature {
+                operation_id,
+                matched: PrematureDataMatch::Secondary,
+                ..
+            } if operation_id == request.operation_id()
+        ));
+        assert!(matches!(
+            registry.classify_inbound(exact_abort(request)),
+            InboundDataDecision::Premature {
+                operation_id,
+                matched: PrematureDataMatch::Abort,
+                ..
+            } if operation_id == request.operation_id()
+        ));
+        assert_eq!(registry.request_len(), 1);
+        assert_eq!(registry.tombstone_len(), 0);
+        assert!(registry.timers.is_empty());
+
+        registry.mark_visible(request.operation_id());
+        assert!(matches!(
+            registry.classify_inbound(exact_response(request)),
+            InboundDataDecision::MatchedSecondary {
+                operation_id,
+                visibility: OperationVisibility::MayBeVisible,
+                ..
+            } if operation_id == request.operation_id()
+        ));
         assert_index_invariants(&registry);
     }
 
@@ -2237,6 +2427,7 @@ mod tests {
             }
         ));
         assert_eq!(registry.request_len(), 1);
+        registry.mark_visible(request.operation_id());
         assert!(matches!(
             registry.classify_inbound(exact_response(request)),
             InboundDataDecision::MatchedSecondary { .. }
@@ -2260,6 +2451,7 @@ mod tests {
             }
         ));
         assert_eq!(registry.request_len(), 1);
+        registry.mark_visible(request.operation_id());
         assert!(matches!(
             registry.classify_inbound(exact_abort(request)),
             InboundDataDecision::Aborted {
@@ -2430,11 +2622,162 @@ mod tests {
         assert_index_invariants(&registry);
     }
 
+    /// Confirms peer Reject removes a visible request and makes all later signals stale or late.
+    #[test]
+    fn peer_reject_finishes_request_with_timer_and_terminal_memory() {
+        let mut registry = registry(1, 8);
+        let request = reserve_request(&mut registry, 1);
+        let token = t3(1);
+        registry.mark_committed(request.operation_id(), token);
+
+        assert_eq!(
+            registry.finish_peer_rejected(request.operation_id(), OperationClass::Request),
+            PeerRejectFinishDecision::Finished {
+                operation_id: request.operation_id(),
+                system_bytes: request.system_bytes(),
+                class: OperationClass::Request,
+                visibility: OperationVisibility::Committed,
+                cancel_timer: Some(token),
+            }
+        );
+        assert_eq!(registry.expire_t3(token), ExpiryDecision::Stale);
+        assert!(matches!(
+            registry.classify_inbound(exact_response(request)),
+            InboundDataDecision::Tombstoned {
+                operation_id,
+                category: TombstoneCategory::PeerRejected,
+                arrival: TombstoneArrival::Late,
+                ..
+            } if operation_id == request.operation_id()
+        ));
+        assert!(matches!(
+            registry.classify_inbound(exact_abort(request)),
+            InboundDataDecision::Tombstoned {
+                category: TombstoneCategory::PeerRejected,
+                arrival: TombstoneArrival::Late,
+                ..
+            }
+        ));
+        assert_eq!(
+            registry.finish_peer_rejected(request.operation_id(), OperationClass::Request),
+            PeerRejectFinishDecision::AlreadyTerminal {
+                category: TombstoneCategory::PeerRejected,
+            }
+        );
+        assert_index_invariants(&registry);
+    }
+
+    /// Confirms peer Reject removes exact visible one-way and committed control owners.
+    #[test]
+    fn peer_reject_finishes_one_way_and_control_classes_exactly() {
+        let mut registry = registry(1, 8);
+        let one_way = registry
+            .reserve_one_way(OperationId::new(1), OneWayKind::Data)
+            .expect("one-way");
+        registry.mark_visible(one_way.operation_id());
+
+        assert_eq!(
+            registry.finish_peer_rejected(
+                one_way.operation_id(),
+                OperationClass::OneWay(OneWayKind::Data),
+            ),
+            PeerRejectFinishDecision::Finished {
+                operation_id: one_way.operation_id(),
+                system_bytes: one_way.system_bytes(),
+                class: OperationClass::OneWay(OneWayKind::Data),
+                visibility: OperationVisibility::MayBeVisible,
+                cancel_timer: None,
+            }
+        );
+        assert_eq!(
+            registry.finish_one_way(one_way.operation_id()),
+            FinishDecision::AlreadyTerminal {
+                category: TombstoneCategory::PeerRejected,
+            }
+        );
+
+        let control = registry
+            .reserve_control(
+                OperationId::new(2),
+                ControlKind::Linktest,
+                CONTROL_SESSION_ID,
+            )
+            .expect("control");
+        let token = t6(2);
+        registry.mark_committed(control.operation_id(), token);
+        assert_eq!(
+            registry.finish_peer_rejected(
+                control.operation_id(),
+                OperationClass::Control(ControlKind::Linktest),
+            ),
+            PeerRejectFinishDecision::Finished {
+                operation_id: control.operation_id(),
+                system_bytes: control.system_bytes(),
+                class: OperationClass::Control(ControlKind::Linktest),
+                visibility: OperationVisibility::Committed,
+                cancel_timer: Some(token),
+            }
+        );
+        assert_eq!(registry.expire_control(token), ExpiryDecision::Stale);
+        assert_eq!(
+            registry.take_control(control.kind(), control.session_id(), control.system_bytes()),
+            ControlTakeDecision::Tombstoned {
+                operation_id: control.operation_id(),
+                correlation: control.correlation(),
+                category: TombstoneCategory::PeerRejected,
+                arrival: TombstoneArrival::Late,
+            }
+        );
+        assert_index_invariants(&registry);
+    }
+
+    /// Confirms invalid peer-Reject attribution never mutates a live operation.
+    #[test]
+    fn peer_reject_rejects_unknown_invisible_and_class_mismatched_targets_atomically() {
+        let mut registry = registry(1, 8);
+        let request = reserve_request(&mut registry, 1);
+
+        assert_eq!(
+            registry.finish_peer_rejected(OperationId::new(999), OperationClass::Request),
+            PeerRejectFinishDecision::UnknownOperation
+        );
+        assert_eq!(
+            registry.finish_peer_rejected(
+                request.operation_id(),
+                OperationClass::Control(ControlKind::Select),
+            ),
+            PeerRejectFinishDecision::ClassMismatch {
+                expected: OperationClass::Control(ControlKind::Select),
+                actual: OperationClass::Request,
+            }
+        );
+        assert_eq!(
+            registry.finish_peer_rejected(request.operation_id(), OperationClass::Request),
+            PeerRejectFinishDecision::NotVisible {
+                class: OperationClass::Request,
+            }
+        );
+        assert_eq!(registry.request_len(), 1);
+        assert_eq!(registry.tombstone_len(), 0);
+
+        registry.mark_visible(request.operation_id());
+        assert!(matches!(
+            registry.finish_peer_rejected(request.operation_id(), OperationClass::Request),
+            PeerRejectFinishDecision::Finished {
+                visibility: OperationVisibility::MayBeVisible,
+                cancel_timer: None,
+                ..
+            }
+        ));
+        assert_index_invariants(&registry);
+    }
+
     /// Confirms exact tombstones classify duplicate versus late response forms.
     #[test]
     fn request_tombstone_matching_is_exact_and_structured() {
         let mut registry = registry(1, 4);
         let request = reserve_request(&mut registry, 1);
+        registry.mark_visible(request.operation_id());
         registry.classify_inbound(exact_abort(request));
 
         assert!(matches!(
@@ -2471,6 +2814,7 @@ mod tests {
     fn request_tombstone_rejects_f0_with_w_bit() {
         let mut registry = registry(1, 4);
         let request = reserve_request(&mut registry, 1);
+        registry.mark_visible(request.operation_id());
         registry.classify_inbound(exact_abort(request));
 
         assert!(matches!(
@@ -2500,6 +2844,7 @@ mod tests {
     fn request_tombstone_rejects_f0_with_message_text() {
         let mut registry = registry(1, 4);
         let request = reserve_request(&mut registry, 1);
+        registry.mark_visible(request.operation_id());
         registry.classify_inbound(exact_abort(request));
         let f0_with_body = data_message_with_body(
             request.system_bytes(),
@@ -2537,10 +2882,13 @@ mod tests {
     fn tombstone_eviction_is_fifo() {
         let mut registry = registry(1, 2);
         let first = reserve_request(&mut registry, 1);
+        registry.mark_visible(first.operation_id());
         registry.classify_inbound(exact_response(first));
         let second = reserve_request(&mut registry, 2);
+        registry.mark_visible(second.operation_id());
         registry.classify_inbound(exact_response(second));
         let third = reserve_request(&mut registry, 3);
+        registry.mark_visible(third.operation_id());
         registry.classify_inbound(exact_response(third));
 
         assert_eq!(registry.tombstone_len(), 2);
@@ -2617,6 +2965,7 @@ mod tests {
             }
         );
         assert!(registry.has_control());
+        registry.mark_visible(control.operation_id());
 
         assert_eq!(
             registry.take_control(
@@ -2628,7 +2977,7 @@ mod tests {
                 operation_id: control.operation_id(),
                 correlation: expected,
                 cancel_t6: None,
-                visibility: OperationVisibility::NotVisible,
+                visibility: OperationVisibility::MayBeVisible,
             }
         );
         assert_eq!(
@@ -2684,19 +3033,20 @@ mod tests {
         assert_index_invariants(&registry);
     }
 
-    /// Confirms a control response may win before commit and suppress later T6 arming.
+    /// Confirms a visible control response may win before commit and suppress later T6 arming.
     #[test]
     fn fast_control_response_is_terminal_before_write_commit() {
         let mut registry = registry(1, 4);
         let control = registry
             .reserve_control(OperationId::new(1), ControlKind::Select, CONTROL_SESSION_ID)
             .expect("control");
+        registry.mark_visible(control.operation_id());
 
         assert!(matches!(
             registry.take_control(control.kind(), control.session_id(), control.system_bytes(),),
             ControlTakeDecision::Matched {
                 cancel_t6: None,
-                visibility: OperationVisibility::NotVisible,
+                visibility: OperationVisibility::MayBeVisible,
                 ..
             }
         ));
@@ -2707,6 +3057,37 @@ mod tests {
             }
         );
         assert!(registry.timers.is_empty());
+        assert_index_invariants(&registry);
+    }
+
+    /// Confirms an exact control response before Proceed retains the live control slot.
+    #[test]
+    fn pre_proceed_control_response_is_premature_without_mutation() {
+        let mut registry = registry(1, 4);
+        let control = registry
+            .reserve_control(OperationId::new(1), ControlKind::Select, CONTROL_SESSION_ID)
+            .expect("control");
+
+        assert_eq!(
+            registry.take_control(control.kind(), control.session_id(), control.system_bytes(),),
+            ControlTakeDecision::Premature {
+                operation_id: control.operation_id(),
+                correlation: control.correlation(),
+            }
+        );
+        assert!(registry.has_control());
+        assert_eq!(registry.tombstone_len(), 0);
+        assert!(registry.timers.is_empty());
+
+        registry.mark_visible(control.operation_id());
+        assert!(matches!(
+            registry.take_control(control.kind(), control.session_id(), control.system_bytes(),),
+            ControlTakeDecision::Matched {
+                operation_id,
+                visibility: OperationVisibility::MayBeVisible,
+                ..
+            } if operation_id == control.operation_id()
+        ));
         assert_index_invariants(&registry);
     }
 
@@ -2947,6 +3328,7 @@ mod tests {
             .reserve_control(OperationId::new(3), ControlKind::Select, CONTROL_SESSION_ID)
             .expect("re-selection control");
         assert_eq!(select.system_bytes().get(), 3);
+        registry.mark_visible(select.operation_id());
         assert!(matches!(
             registry.take_control(select.kind(), select.session_id(), select.system_bytes(),),
             ControlTakeDecision::Matched { .. }

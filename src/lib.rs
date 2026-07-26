@@ -13,9 +13,10 @@ pub use hsms::{
     ConfigError, ConnectionCloseReason, ConnectionGeneration, ConnectionMode, ControlIntent,
     DataEventToken, EndpointConfig, EndpointEvent, EndpointEventEnvelope, EndpointLimits,
     EndpointPhase, EndpointStateSnapshot, Function, GenerationSlotSnapshot, HsmsTimeouts,
-    IdentifierError, InboundPrimary, InboundToken, OperationError, PrimaryMessage, ProtocolError,
-    ProtocolNotice, ReplyToken, RunningIntent, SecondaryMessage, SendReceipt, SessionId,
-    SessionState, Stream, TimeoutKind,
+    IdentifierError, InboundPrimary, InboundToken, OperationError, PeerRejectDisposition,
+    PeerRejectNotice, PrimaryMessage, ProtocolError, ProtocolNotice, RejectReason,
+    ReplyAdmissionError, ReplyAdmissionReason, ReplyIntent, ReplyToken, RunningIntent,
+    SecondaryMessage, SendReceipt, SessionId, SessionState, Stream, TimeoutKind,
 };
 pub use secs2::{
     AsciiString, DecodeLimits, LocalizedEncodingCode, LocalizedString, SecsItem, SecsItemError,

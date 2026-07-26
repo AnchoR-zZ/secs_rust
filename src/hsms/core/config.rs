@@ -6,7 +6,10 @@
 
 use std::time::Duration;
 
-use crate::hsms::{model::ids::ConnectionGeneration, SessionId};
+use crate::hsms::{model::ids::ConnectionGeneration, ConfigError, SessionId};
+
+/// One generation permits at most one transactional control operation.
+const CONTROL_OPERATION_CAPACITY: usize = 1;
 
 /// Selection behavior used when a newly connected generation starts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,34 +80,78 @@ impl CoreTimeouts {
     }
 }
 
-/// Registry capacities required by one generation-scoped Core.
+/// Bounded resource capacities required by one generation-scoped Core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CoreLimits {
+    /// Maximum number of active writes owned by the critical scheduler lane.
+    critical_lane_capacity: usize,
+    /// Maximum number of active writes owned by the Data scheduler lane.
+    data_lane_capacity: usize,
+    /// Maximum number of in-flight application-delivery correlations.
+    application_delivery_capacity: usize,
     /// Maximum number of simultaneously pending request/response transactions.
     transaction_capacity: usize,
     /// Maximum number of completed transaction identities retained as tombstones.
     tombstone_capacity: usize,
-    /// Non-zero maximum number of live single-use reply capabilities.
+    /// Maximum number of pending-publication or available reply capabilities.
     reply_capability_capacity: usize,
+    /// Maximum number of live semantic operations across all ownership classes.
+    operation_capacity: usize,
+    /// Independent bound for terminal outbound-header correlation records.
+    outbound_correlation_history_capacity: usize,
 }
 
 impl CoreLimits {
-    /// Creates the Core's narrow registry-capacity policy.
+    /// Creates the Core's narrow bounded-resource policy.
     ///
-    /// Generation assembly supplies `transaction_capacity`,
-    /// `tombstone_capacity`, and `reply_capability_capacity` from already
-    /// validated endpoint limits. This constructor performs no additional
-    /// validation and returns only the capacities used by Core logic.
-    pub(crate) const fn new(
+    /// Generation assembly supplies every value from already validated
+    /// endpoint limits. The two write-lane values must be identical to those
+    /// used by `WireScheduler`; `application_delivery_capacity` comes from the
+    /// application-event queue policy. The constructor derives the
+    /// `OperationLedger` bound as `transactions + one control operation + both
+    /// active write lanes`; it rejects arithmetic overflow rather than
+    /// allowing an accidentally unbounded ledger.
+    pub(crate) fn new(
+        critical_lane_capacity: usize,
+        data_lane_capacity: usize,
+        application_delivery_capacity: usize,
         transaction_capacity: usize,
         tombstone_capacity: usize,
         reply_capability_capacity: usize,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, ConfigError> {
+        let operation_capacity = transaction_capacity
+            .checked_add(CONTROL_OPERATION_CAPACITY)
+            .and_then(|capacity| capacity.checked_add(data_lane_capacity))
+            .and_then(|capacity| capacity.checked_add(critical_lane_capacity))
+            .ok_or(ConfigError::DerivedCapacityOverflow {
+                field: "operation_capacity",
+            })?;
+
+        Ok(Self {
+            critical_lane_capacity,
+            data_lane_capacity,
+            application_delivery_capacity,
             transaction_capacity,
             tombstone_capacity,
             reply_capability_capacity,
-        }
+            operation_capacity,
+            outbound_correlation_history_capacity: tombstone_capacity,
+        })
+    }
+
+    /// Returns the independent active-write limit for the critical lane.
+    pub(crate) const fn critical_lane_capacity(self) -> usize {
+        self.critical_lane_capacity
+    }
+
+    /// Returns the independent active-write limit for the Data lane.
+    pub(crate) const fn data_lane_capacity(self) -> usize {
+        self.data_lane_capacity
+    }
+
+    /// Returns the maximum number of in-flight application deliveries.
+    pub(crate) const fn application_delivery_capacity(self) -> usize {
+        self.application_delivery_capacity
     }
 
     /// Returns the maximum number of simultaneously pending transactions.
@@ -117,9 +164,20 @@ impl CoreLimits {
         self.tombstone_capacity
     }
 
-    /// Returns the non-zero maximum number of live reply capabilities.
+    /// Returns the maximum number of pending or available reply capabilities.
     pub(crate) const fn reply_capability_capacity(self) -> usize {
         self.reply_capability_capacity
+    }
+
+    /// Returns the derived maximum number of live semantic operations.
+    pub(crate) const fn operation_capacity(self) -> usize {
+        self.operation_capacity
+    }
+
+    /// Returns the independent terminal-history bound used for outbound
+    /// Reject-correlation records.
+    pub(crate) const fn outbound_correlation_history_capacity(self) -> usize {
+        self.outbound_correlation_history_capacity
     }
 }
 
@@ -184,5 +242,38 @@ impl CoreConfig {
     /// Returns the narrow validated registry capacities used by Core logic.
     pub(crate) const fn limits(&self) -> CoreLimits {
         self.limits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CoreLimits;
+
+    /// Confirms asymmetric capacities retain their exact source fields instead
+    /// of being reordered or collapsed into a shared write-lane limit.
+    #[test]
+    fn core_limits_preserve_independent_resource_capacities() {
+        let limits = CoreLimits::new(3, 7, 11, 13, 17, 19).expect("capacities fit");
+
+        assert_eq!(limits.critical_lane_capacity(), 3);
+        assert_eq!(limits.data_lane_capacity(), 7);
+        assert_eq!(limits.application_delivery_capacity(), 11);
+        assert_eq!(limits.transaction_capacity(), 13);
+        assert_eq!(limits.tombstone_capacity(), 17);
+        assert_eq!(limits.reply_capability_capacity(), 19);
+        assert_eq!(limits.operation_capacity(), 24);
+        assert_eq!(limits.outbound_correlation_history_capacity(), 17);
+    }
+
+    /// Confirms an overflowing aggregate operation bound is rejected during
+    /// configuration derivation instead of wrapping to a smaller capacity.
+    #[test]
+    fn core_limits_reject_operation_capacity_overflow() {
+        assert_eq!(
+            CoreLimits::new(1, 1, 1, usize::MAX, 1, 1),
+            Err(crate::hsms::ConfigError::DerivedCapacityOverflow {
+                field: "operation_capacity",
+            })
+        );
     }
 }

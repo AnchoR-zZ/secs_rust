@@ -1,4 +1,4 @@
-//! Exactly-once command completion values produced by Core and endpoint runtime.
+//! Defines exactly-once generation-command completion values emitted by Core.
 //!
 //! Public receipts expose deterministic local write commitment. Internal
 //! completion envelopes correlate one result to the command accepted by
@@ -7,9 +7,11 @@
 #![allow(dead_code)]
 
 use crate::hsms::{
-    model::ids::{CommandId, WireSequence},
-    ConnectionGeneration, OperationError, SecondaryMessage,
+    error::OperationError,
+    model::ids::{CommandId, ConnectionGeneration, WireSequence},
 };
+
+use super::message::SecondaryMessage;
 
 /// Proof that one complete frame reached the local writer commit point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,69 +45,61 @@ impl SendReceipt {
     }
 }
 
-/// Successful result payload for one accepted endpoint command.
+/// Successful result payload for one generation-scoped Core command.
 #[derive(Debug)]
-pub(crate) enum CompletionValue {
-    /// Endpoint startup reached its defined completion point.
-    Started,
-    /// Endpoint shutdown completed with clean resources.
-    Stopped,
-    /// The requested connection generation was disconnected.
-    Disconnected,
+pub(crate) enum CoreCompletionValue {
     /// A W=0 Primary frame committed locally.
     Sent(SendReceipt),
     /// A Secondary reply frame committed locally.
     Replied(SendReceipt),
+    /// A header-only SxF0 transaction abort committed locally.
+    ReplyAborted(SendReceipt),
+    /// A reply capability was released locally without writing a frame.
+    ReplyAbandoned,
     /// A request received and validated its matching Secondary.
     Secondary(SecondaryMessage),
     /// A typed control operation reached its defined successful outcome.
     ControlCompleted,
 }
 
-/// Result routed back to the exactly-once completion guard for one command.
+/// Result routed back to one generation command's exactly-once completion guard.
 #[derive(Debug)]
-pub(crate) struct CommandCompletion {
+pub(crate) struct CoreCommandCompletion {
     /// Accepted command that owns this result.
     command_id: CommandId,
     /// Successful completion payload or stable operation failure.
-    result: Result<CompletionValue, OperationError>,
+    result: Result<CoreCompletionValue, OperationError>,
 }
 
-impl CommandCompletion {
-    /// Completes startup command `command_id` after the endpoint reaches its
-    /// defined running state.
-    pub(crate) const fn started(command_id: CommandId) -> Self {
-        Self::succeeded(command_id, CompletionValue::Started)
-    }
-
-    /// Completes stop command `command_id` after endpoint cleanup succeeds.
-    pub(crate) const fn stopped(command_id: CommandId) -> Self {
-        Self::succeeded(command_id, CompletionValue::Stopped)
-    }
-
-    /// Completes disconnect command `command_id` after its generation ends.
-    pub(crate) const fn disconnected(command_id: CommandId) -> Self {
-        Self::succeeded(command_id, CompletionValue::Disconnected)
-    }
-
+impl CoreCommandCompletion {
     /// Completes W=0 send command `command_id` with local commit `receipt`.
     pub(crate) const fn sent(command_id: CommandId, receipt: SendReceipt) -> Self {
-        Self::succeeded(command_id, CompletionValue::Sent(receipt))
+        Self::succeeded(command_id, CoreCompletionValue::Sent(receipt))
     }
 
     /// Completes reply command `command_id` with local commit `receipt`.
     pub(crate) const fn replied(command_id: CommandId, receipt: SendReceipt) -> Self {
-        Self::succeeded(command_id, CompletionValue::Replied(receipt))
+        Self::succeeded(command_id, CoreCompletionValue::Replied(receipt))
+    }
+
+    /// Completes abort command `command_id` with local SxF0 commit `receipt`.
+    pub(crate) const fn reply_aborted(command_id: CommandId, receipt: SendReceipt) -> Self {
+        Self::succeeded(command_id, CoreCompletionValue::ReplyAborted(receipt))
+    }
+
+    /// Completes command `command_id` after locally abandoning its capability.
+    pub(crate) const fn reply_abandoned(command_id: CommandId) -> Self {
+        Self::succeeded(command_id, CoreCompletionValue::ReplyAbandoned)
     }
 
     /// Completes request command `command_id` with its matched `secondary`.
     pub(crate) const fn secondary(command_id: CommandId, secondary: SecondaryMessage) -> Self {
-        Self::succeeded(command_id, CompletionValue::Secondary(secondary))
+        Self::succeeded(command_id, CoreCompletionValue::Secondary(secondary))
     }
 
     /// Completes typed control command `command_id` after its success point.
     pub(crate) const fn control_completed(command_id: CommandId) -> Self {
-        Self::succeeded(command_id, CompletionValue::ControlCompleted)
+        Self::succeeded(command_id, CoreCompletionValue::ControlCompleted)
     }
 
     /// Completes command `command_id` with stable operation `error`.
@@ -122,17 +116,17 @@ impl CommandCompletion {
     }
 
     /// Borrows the successful completion value or operation failure.
-    pub(crate) const fn result(&self) -> &Result<CompletionValue, OperationError> {
+    pub(crate) const fn result(&self) -> &Result<CoreCompletionValue, OperationError> {
         &self.result
     }
 
     /// Consumes the envelope and returns its successful value or failure.
-    pub(crate) fn into_result(self) -> Result<CompletionValue, OperationError> {
+    pub(crate) fn into_result(self) -> Result<CoreCompletionValue, OperationError> {
         self.result
     }
 
     /// Builds one successful completion for `command_id` and `value`.
-    const fn succeeded(command_id: CommandId, value: CompletionValue) -> Self {
+    const fn succeeded(command_id: CommandId, value: CoreCompletionValue) -> Self {
         Self {
             command_id,
             result: Ok(value),
@@ -143,11 +137,12 @@ impl CommandCompletion {
 #[cfg(test)]
 mod tests {
     use crate::hsms::{
-        model::ids::{CommandId, ConnectionGeneration, WireSequence},
-        Function, OperationError, Stream,
+        error::OperationError,
+        model::ids::{CommandId, ConnectionGeneration, Function, Stream, WireSequence},
     };
 
-    use super::{CommandCompletion, CompletionValue, SecondaryMessage, SendReceipt};
+    use super::{CoreCommandCompletion, CoreCompletionValue, SendReceipt};
+    use crate::hsms::contracts::message::SecondaryMessage;
 
     /// Creates a deterministic local commit receipt for completion tests.
     fn receipt() -> SendReceipt {
@@ -170,35 +165,31 @@ mod tests {
         let command_id = CommandId::new(5);
 
         assert!(matches!(
-            CommandCompletion::started(command_id).result(),
-            Ok(CompletionValue::Started)
+            CoreCommandCompletion::sent(command_id, receipt()).result(),
+            Ok(CoreCompletionValue::Sent(value)) if *value == receipt()
         ));
         assert!(matches!(
-            CommandCompletion::stopped(command_id).result(),
-            Ok(CompletionValue::Stopped)
+            CoreCommandCompletion::replied(command_id, receipt()).result(),
+            Ok(CoreCompletionValue::Replied(value)) if *value == receipt()
         ));
         assert!(matches!(
-            CommandCompletion::disconnected(command_id).result(),
-            Ok(CompletionValue::Disconnected)
+            CoreCommandCompletion::reply_aborted(command_id, receipt()).result(),
+            Ok(CoreCompletionValue::ReplyAborted(value)) if *value == receipt()
         ));
         assert!(matches!(
-            CommandCompletion::sent(command_id, receipt()).result(),
-            Ok(CompletionValue::Sent(value)) if *value == receipt()
+            CoreCommandCompletion::reply_abandoned(command_id).result(),
+            Ok(CoreCompletionValue::ReplyAbandoned)
         ));
         assert!(matches!(
-            CommandCompletion::replied(command_id, receipt()).result(),
-            Ok(CompletionValue::Replied(value)) if *value == receipt()
-        ));
-        assert!(matches!(
-            CommandCompletion::secondary(command_id, secondary()).result(),
-            Ok(CompletionValue::Secondary(value))
+            CoreCommandCompletion::secondary(command_id, secondary()).result(),
+            Ok(CoreCompletionValue::Secondary(value))
                 if value.stream().get() == 3 && value.function().get() == 4
         ));
-        let completed = CommandCompletion::control_completed(command_id);
+        let completed = CoreCommandCompletion::control_completed(command_id);
         assert_eq!(completed.command_id(), command_id);
         assert!(matches!(
             completed.into_result(),
-            Ok(CompletionValue::ControlCompleted)
+            Ok(CoreCompletionValue::ControlCompleted)
         ));
     }
 
@@ -207,7 +198,7 @@ mod tests {
     fn failure_completion_preserves_operation_error() {
         let command_id = CommandId::new(6);
         let completion =
-            CommandCompletion::failed(command_id, OperationError::ReplyCapabilityUnavailable);
+            CoreCommandCompletion::failed(command_id, OperationError::ReplyCapabilityUnavailable);
 
         assert_eq!(completion.command_id(), command_id);
         assert_eq!(

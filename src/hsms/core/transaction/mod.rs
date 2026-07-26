@@ -16,7 +16,30 @@ pub(crate) use registry::{
     CloseDecision, CloseOperation, CollisionSource, CommitDecision, ControlCollision,
     ControlCorrelation, ControlKind, ControlTakeDecision, ExpiryDecision, FinishDecision,
     InboundDataDecision, MarkVisibleDecision, OneWayKind, OperationClass, OperationDisposition,
-    OperationVisibility, RegistryBuildError, ReserveError, ReservedControl, ReservedOneWay,
-    ReservedRequest, SessionResetDecision, SessionResetOperation, TombstoneArrival,
-    TombstoneCategory, TransactionRegistry,
+    OperationVisibility, PeerRejectFinishDecision, PrematureDataMatch, RegistryBuildError,
+    ReserveError, ReservedControl, ReservedOneWay, ReservedRequest, SessionResetDecision,
+    SessionResetOperation, TombstoneArrival, TombstoneCategory, TransactionRegistry,
 };
+
+#[cfg(test)]
+mod reexport_tests {
+    use super::{PeerRejectFinishDecision, PrematureDataMatch, TombstoneCategory};
+
+    /// Proves sibling Core modules can name both registry decisions through the
+    /// transaction boundary without reaching into the private registry module.
+    #[test]
+    fn registry_decision_reexports_are_sibling_reachable() {
+        assert!(matches!(
+            PrematureDataMatch::Secondary,
+            PrematureDataMatch::Secondary
+        ));
+        assert!(matches!(
+            PeerRejectFinishDecision::AlreadyTerminal {
+                category: TombstoneCategory::PeerRejected,
+            },
+            PeerRejectFinishDecision::AlreadyTerminal {
+                category: TombstoneCategory::PeerRejected,
+            }
+        ));
+    }
+}
