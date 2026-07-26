@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+pub(crate) mod config;
 pub(crate) mod control;
 pub(crate) mod drain;
 pub(crate) mod effect;

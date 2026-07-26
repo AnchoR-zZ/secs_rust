@@ -6,9 +6,11 @@
 
 #![allow(dead_code)]
 
+use std::fmt;
+
 use crate::{
     hsms::{
-        model::ids::{EventSequence, SystemBytes},
+        model::ids::{ReplyCapabilityId, SystemBytes},
         ConnectionGeneration, Function, SessionId, Stream,
     },
     secs2::SecsItem,
@@ -116,27 +118,115 @@ impl SecondaryMessage {
 }
 
 /// Single-use capability for replying to an inbound W=1 primary.
-#[derive(Debug)]
 pub struct ReplyToken {
+    /// Opaque identity used to consume this reply authority exactly once.
+    capability_id: ReplyCapabilityId,
     /// TCP incarnation on which the inbound primary was received.
-    pub(crate) generation: ConnectionGeneration,
+    generation: ConnectionGeneration,
     /// Session ID that the generated Secondary must preserve.
-    pub(crate) session_id: SessionId,
+    session_id: SessionId,
     /// Stream number that the generated Secondary must preserve.
-    pub(crate) stream: Stream,
+    stream: Stream,
     /// Function number the generated Secondary must use.
-    pub(crate) reply_function: Function,
+    reply_function: Function,
     /// System Bytes that correlate the Secondary to its inbound Primary.
-    pub(crate) system_bytes: SystemBytes,
+    system_bytes: SystemBytes,
 }
 
-/// Delivery identity for an inbound W=0 primary.
-#[derive(Debug)]
+impl ReplyToken {
+    /// Creates the single-use reply authority identified by `capability_id`.
+    ///
+    /// `generation`, `session_id`, `stream`, `reply_function`, and
+    /// `system_bytes` are preserved from the inbound primary or derived by the
+    /// Core. This crate-private constructor prevents applications from forging
+    /// transaction metadata.
+    pub(crate) const fn new(
+        capability_id: ReplyCapabilityId,
+        generation: ConnectionGeneration,
+        session_id: SessionId,
+        stream: Stream,
+        reply_function: Function,
+        system_bytes: SystemBytes,
+    ) -> Self {
+        Self {
+            capability_id,
+            generation,
+            session_id,
+            stream,
+            reply_function,
+            system_bytes,
+        }
+    }
+
+    /// Returns the identity used to consume this authority exactly once.
+    pub(crate) const fn capability_id(&self) -> ReplyCapabilityId {
+        self.capability_id
+    }
+
+    /// Returns the TCP generation on which the primary arrived.
+    pub(crate) const fn generation(&self) -> ConnectionGeneration {
+        self.generation
+    }
+
+    /// Returns the Session ID that the Secondary must preserve.
+    pub(crate) const fn session_id(&self) -> SessionId {
+        self.session_id
+    }
+
+    /// Returns the stream number that the Secondary must preserve.
+    pub(crate) const fn stream(&self) -> Stream {
+        self.stream
+    }
+
+    /// Returns the function number selected for the Secondary.
+    pub(crate) const fn reply_function(&self) -> Function {
+        self.reply_function
+    }
+
+    /// Returns the internal System Bytes correlation value.
+    pub(crate) const fn system_bytes(&self) -> SystemBytes {
+        self.system_bytes
+    }
+}
+
+impl fmt::Debug for ReplyToken {
+    /// Formats the opaque reply capability without exposing raw transaction
+    /// header fields or System Bytes through the public API.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReplyToken")
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Opaque marker for an inbound W=0 primary that carries no reply authority.
+///
+/// The surrounding [`crate::hsms::EndpointEventEnvelope`] carries publication
+/// sequence and generation metadata. This marker is constructed only inside
+/// the crate so applications cannot fabricate Core-classified inbound data.
 pub struct DataEventToken {
-    /// TCP incarnation that produced the unreplyable W=0 event.
-    pub(crate) generation: ConnectionGeneration,
-    /// Endpoint publication identity assigned to the event.
-    pub(crate) sequence: EventSequence,
+    /// Private zero-sized field that prevents application construction.
+    private: (),
+}
+
+impl DataEventToken {
+    /// Creates an opaque marker for a Core-classified inbound W=0 primary.
+    ///
+    /// The returned marker contains no generation or publication identity;
+    /// those values belong to the endpoint event envelope.
+    pub(crate) const fn new() -> Self {
+        Self { private: () }
+    }
+}
+
+impl fmt::Debug for DataEventToken {
+    /// Formats the marker without exposing its private representation.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DataEventToken")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Exactly one token kind accompanies an inbound primary.
@@ -144,7 +234,7 @@ pub struct DataEventToken {
 pub enum InboundToken {
     /// Single-use authority to send the Secondary for an inbound W=1 Primary.
     Reply(ReplyToken),
-    /// Delivery identity for an inbound W=0 Primary that expects no reply.
+    /// Opaque marker for an inbound W=0 Primary that expects no reply.
     Data(DataEventToken),
 }
 
@@ -171,7 +261,7 @@ impl InboundPrimary {
     }
 
     #[must_use]
-    /// Borrows the reply capability or W=0 delivery identity.
+    /// Borrows the reply capability or opaque W=0 marker.
     pub const fn token(&self) -> &InboundToken {
         &self.token
     }
@@ -180,5 +270,18 @@ impl InboundPrimary {
     /// Consumes the event and returns its message and exclusive token.
     pub fn into_parts(self) -> (PrimaryMessage, InboundToken) {
         (self.message, self.token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DataEventToken;
+
+    /// Verifies that the public marker's debug form exposes no private state.
+    #[test]
+    fn data_event_token_debug_is_opaque() {
+        let token = DataEventToken::new();
+
+        assert_eq!(format!("{token:?}"), "DataEventToken { .. }");
     }
 }

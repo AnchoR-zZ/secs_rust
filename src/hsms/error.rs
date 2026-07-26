@@ -5,7 +5,7 @@
 
 use thiserror::Error;
 
-use crate::secs2::SecsItemError;
+use crate::{hsms::model::ids::Function, secs2::SecsItemError};
 
 /// Invalid protocol identifier values.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -80,6 +80,14 @@ pub enum TimeoutKind {
 /// A protocol-level failure that is independent of transport implementation.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ProtocolError {
+    /// An application attempted to use an even or zero SECS function as a
+    /// primary message.
+    #[error("SECS function {function:?} is not a valid primary function")]
+    InvalidPrimaryFunction {
+        /// Function value rejected by primary-message validation.
+        function: Function,
+    },
+
     /// An inbound message violated an HSMS protocol rule.
     #[error("HSMS protocol violation: {description}")]
     Violation {
@@ -90,6 +98,10 @@ pub enum ProtocolError {
     /// A candidate Secondary failed the pending transaction's response matcher.
     #[error("received response does not match the pending transaction")]
     ResponseMismatch,
+
+    /// Protocol state changed before a transaction could complete normally.
+    #[error("HSMS transaction was aborted")]
+    TransactionAborted,
 }
 
 /// Failure returned by a typed endpoint operation.
@@ -106,6 +118,11 @@ pub enum OperationError {
     /// A Data operation was attempted outside the Selected state.
     #[error("HSMS session is not selected")]
     NotSelected,
+
+    /// A previously accepted operation was aborted because the session left
+    /// the Selected state.
+    #[error("HSMS session was deselected before the operation completed")]
+    SessionDeselected,
 
     /// Shutdown has closed admission for this operation class.
     #[error("HSMS endpoint is draining and no longer accepts this operation")]

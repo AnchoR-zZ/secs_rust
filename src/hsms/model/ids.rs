@@ -141,6 +141,18 @@ internal_id!(
     "Identifies one Core operation across scheduling and completion."
 );
 internal_id!(
+    WriteId,
+    "Identifies one outbound write independently of its owning Core operation."
+);
+internal_id!(
+    DeliveryId,
+    "Identifies one reliable application delivery attempt and its completion."
+);
+internal_id!(
+    ReplyCapabilityId,
+    "Identifies one single-use authority to reply to an inbound primary."
+);
+internal_id!(
     TimerId,
     "Identifies one timer registration independently of its timeout kind."
 );
