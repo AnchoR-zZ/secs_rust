@@ -6,9 +6,12 @@
 
 #![allow(dead_code)]
 
-use crate::{hsms::model::ids::CommandId, secs2::SecsItem};
+use crate::secs2::SecsItem;
 
-use super::message::{PrimaryMessage, ReplyToken};
+use super::{
+    completion::CommandCompletionAuthority,
+    message::{PrimaryMessage, ReplyToken},
+};
 
 /// Typed control-plane intent. Applications cannot construct raw control
 /// headers or choose System Bytes.
@@ -28,25 +31,26 @@ pub enum ControlIntent {
 
 /// Generation-scoped command vocabulary consumed by `HsmsCore`.
 #[derive(Debug)]
+#[must_use = "a core command must be routed to the owning session driver"]
 pub(crate) enum CoreCommand {
     /// Write a W=0 Primary and complete after the frame is committed locally.
     Send {
-        /// Application command whose completion must be delivered exactly once.
-        command_id: CommandId,
+        /// Move-only authority eventually consumed by this command's terminal result.
+        completion: CommandCompletionAuthority,
         /// Application-provided primary content; the Core supplies W=0 metadata.
         message: PrimaryMessage,
     },
     /// Write a W=1 Primary and await a response that matches its transaction.
     Request {
-        /// Application command whose Secondary or failure completes the request.
-        command_id: CommandId,
+        /// Move-only authority eventually consumed by this request's terminal result.
+        completion: CommandCompletionAuthority,
         /// Application-provided primary content; the Core supplies W=1 metadata.
         message: PrimaryMessage,
     },
     /// Consume a normal-mode inbound capability and send its F+1 Secondary.
     Reply {
-        /// Application command completed when the Secondary frame commits.
-        command_id: CommandId,
+        /// Move-only authority consumed when the Secondary frame terminates.
+        completion: CommandCompletionAuthority,
         /// Single-use authority identifying the inbound W=1 Primary.
         token: ReplyToken,
         /// Optional Secondary Message Text supplied by the application.
@@ -54,22 +58,22 @@ pub(crate) enum CoreCommand {
     },
     /// Consume an inbound reply capability and send a header-only SxF0 abort.
     AbortReply {
-        /// Application command completed when the abort frame commits.
-        command_id: CommandId,
+        /// Move-only authority consumed when the abort frame terminates.
+        completion: CommandCompletionAuthority,
         /// Single-use authority identifying the inbound W=1 Primary.
         token: ReplyToken,
     },
     /// Consume an inbound reply capability without writing a protocol frame.
     AbandonReply {
-        /// Application command completed when Core commits local abandonment.
-        command_id: CommandId,
+        /// Move-only authority consumed by the local abandonment transition.
+        completion: CommandCompletionAuthority,
         /// Single-use authority released without a peer-visible response.
         token: ReplyToken,
     },
     /// Execute a typed HSMS control-plane operation.
     Control {
-        /// Application command completed by the control transaction outcome.
-        command_id: CommandId,
+        /// Move-only authority consumed by the control transaction outcome.
+        completion: CommandCompletionAuthority,
         /// Control operation requested without exposing a raw header.
         intent: ControlIntent,
     },

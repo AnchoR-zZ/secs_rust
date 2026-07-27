@@ -11,14 +11,16 @@ mod registry;
 
 #[allow(unused_imports)]
 pub(crate) use matcher::{MatcherBuildError, MatcherDecision, MismatchField, ResponseMatcher};
+pub(crate) use registry::PeerRejectRegistryRelease;
 #[allow(unused_imports)]
 pub(crate) use registry::{
     CloseDecision, CloseOperation, CollisionSource, CommitDecision, ControlCollision,
     ControlCorrelation, ControlKind, ControlTakeDecision, ExpiryDecision, FinishDecision,
     InboundDataDecision, MarkVisibleDecision, OneWayKind, OperationClass, OperationDisposition,
     OperationVisibility, PeerRejectFinishDecision, PrematureDataMatch, RegistryBuildError,
-    ReserveError, ReservedControl, ReservedOneWay, ReservedRequest, SessionResetDecision,
-    SessionResetOperation, TombstoneArrival, TombstoneCategory, TransactionRegistry,
+    RegistryOperationState, ReserveError, ReservedControl, ReservedOneWay, ReservedRequest,
+    SessionResetDecision, SessionResetOperation, TombstoneArrival, TombstoneCategory,
+    TransactionRegistry,
 };
 
 #[cfg(test)]

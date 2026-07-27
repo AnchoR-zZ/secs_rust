@@ -64,6 +64,7 @@ pub(crate) enum CoreCompletionValue {
 
 /// Result routed back to one generation command's exactly-once completion guard.
 #[derive(Debug)]
+#[must_use = "a command completion must be delivered or explicitly discarded"]
 pub(crate) struct CoreCommandCompletion {
     /// Accepted command that owns this result.
     command_id: CommandId,
@@ -71,45 +72,91 @@ pub(crate) struct CoreCommandCompletion {
     result: Result<CoreCompletionValue, OperationError>,
 }
 
-impl CoreCommandCompletion {
-    /// Completes W=0 send command `command_id` with local commit `receipt`.
-    pub(crate) const fn sent(command_id: CommandId, receipt: SendReceipt) -> Self {
-        Self::succeeded(command_id, CoreCompletionValue::Sent(receipt))
+/// Move-only authority to construct exactly one command completion envelope.
+///
+/// Admission creates this value together with a [`CommandId`], moves it through
+/// [`super::CoreCommand`] into `OperationLedger`, and never recreates it from
+/// the copyable identifier. Every terminal constructor consumes `self`, making
+/// duplicate completion construction impossible without duplicating authority.
+#[must_use = "accepted command completion authority must be moved to its sole owner"]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CommandCompletionAuthority {
+    /// Accepted command correlated by the completion this authority creates.
+    command_id: CommandId,
+}
+
+impl CommandCompletionAuthority {
+    /// Creates the unique completion authority for one newly accepted command.
+    ///
+    /// Visibility is restricted to the `contracts` module, where the future
+    /// command-admission issuer will live. Production Core modules can move an
+    /// accepted authority but cannot reconstruct one from a copyable ID.
+    pub(super) const fn new(command_id: CommandId) -> Self {
+        Self { command_id }
     }
 
-    /// Completes reply command `command_id` with local commit `receipt`.
-    pub(crate) const fn replied(command_id: CommandId, receipt: SendReceipt) -> Self {
-        Self::succeeded(command_id, CoreCompletionValue::Replied(receipt))
+    /// Creates an isolated authority for crate unit tests only.
+    ///
+    /// This factory is absent from production builds and therefore cannot
+    /// become a raw-ID completion-authority issuer in runtime code.
+    #[cfg(test)]
+    pub(crate) const fn for_test(command_id: CommandId) -> Self {
+        Self::new(command_id)
     }
 
-    /// Completes abort command `command_id` with local SxF0 commit `receipt`.
-    pub(crate) const fn reply_aborted(command_id: CommandId, receipt: SendReceipt) -> Self {
-        Self::succeeded(command_id, CoreCompletionValue::ReplyAborted(receipt))
+    /// Returns the copyable identity used only for uniqueness indexes.
+    pub(crate) const fn command_id(&self) -> CommandId {
+        self.command_id
     }
 
-    /// Completes command `command_id` after locally abandoning its capability.
-    pub(crate) const fn reply_abandoned(command_id: CommandId) -> Self {
-        Self::succeeded(command_id, CoreCompletionValue::ReplyAbandoned)
+    /// Consumes this authority to complete a W=0 send after local commitment.
+    pub(crate) const fn sent(self, receipt: SendReceipt) -> CoreCommandCompletion {
+        self.succeeded(CoreCompletionValue::Sent(receipt))
     }
 
-    /// Completes request command `command_id` with its matched `secondary`.
-    pub(crate) const fn secondary(command_id: CommandId, secondary: SecondaryMessage) -> Self {
-        Self::succeeded(command_id, CoreCompletionValue::Secondary(secondary))
+    /// Consumes this authority to complete a normal Secondary reply.
+    pub(crate) const fn replied(self, receipt: SendReceipt) -> CoreCommandCompletion {
+        self.succeeded(CoreCompletionValue::Replied(receipt))
     }
 
-    /// Completes typed control command `command_id` after its success point.
-    pub(crate) const fn control_completed(command_id: CommandId) -> Self {
-        Self::succeeded(command_id, CoreCompletionValue::ControlCompleted)
+    /// Consumes this authority to complete a header-only SxF0 reply.
+    pub(crate) const fn reply_aborted(self, receipt: SendReceipt) -> CoreCommandCompletion {
+        self.succeeded(CoreCompletionValue::ReplyAborted(receipt))
     }
 
-    /// Completes command `command_id` with stable operation `error`.
-    pub(crate) const fn failed(command_id: CommandId, error: OperationError) -> Self {
-        Self {
-            command_id,
+    /// Consumes this authority after locally abandoning a reply capability.
+    pub(crate) const fn reply_abandoned(self) -> CoreCommandCompletion {
+        self.succeeded(CoreCompletionValue::ReplyAbandoned)
+    }
+
+    /// Consumes this authority with the matching request Secondary.
+    pub(crate) const fn secondary(self, secondary: SecondaryMessage) -> CoreCommandCompletion {
+        self.succeeded(CoreCompletionValue::Secondary(secondary))
+    }
+
+    /// Consumes this authority when a typed control operation succeeds.
+    pub(crate) const fn control_completed(self) -> CoreCommandCompletion {
+        self.succeeded(CoreCompletionValue::ControlCompleted)
+    }
+
+    /// Consumes this authority with one stable terminal operation error.
+    pub(crate) const fn failed(self, error: OperationError) -> CoreCommandCompletion {
+        CoreCommandCompletion {
+            command_id: self.command_id,
             result: Err(error),
         }
     }
 
+    /// Consumes this authority with one successful typed completion value.
+    const fn succeeded(self, value: CoreCompletionValue) -> CoreCommandCompletion {
+        CoreCommandCompletion {
+            command_id: self.command_id,
+            result: Ok(value),
+        }
+    }
+}
+
+impl CoreCommandCompletion {
     /// Returns the accepted application command that owns this completion.
     pub(crate) const fn command_id(&self) -> CommandId {
         self.command_id
@@ -124,14 +171,6 @@ impl CoreCommandCompletion {
     pub(crate) fn into_result(self) -> Result<CoreCompletionValue, OperationError> {
         self.result
     }
-
-    /// Builds one successful completion for `command_id` and `value`.
-    const fn succeeded(command_id: CommandId, value: CoreCompletionValue) -> Self {
-        Self {
-            command_id,
-            result: Ok(value),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -141,7 +180,7 @@ mod tests {
         model::ids::{CommandId, ConnectionGeneration, Function, Stream, WireSequence},
     };
 
-    use super::{CoreCommandCompletion, CoreCompletionValue, SendReceipt};
+    use super::{CommandCompletionAuthority, CoreCompletionValue, SendReceipt};
     use crate::hsms::contracts::message::SecondaryMessage;
 
     /// Creates a deterministic local commit receipt for completion tests.
@@ -165,27 +204,37 @@ mod tests {
         let command_id = CommandId::new(5);
 
         assert!(matches!(
-            CoreCommandCompletion::sent(command_id, receipt()).result(),
+            CommandCompletionAuthority::new(command_id)
+                .sent(receipt())
+                .result(),
             Ok(CoreCompletionValue::Sent(value)) if *value == receipt()
         ));
         assert!(matches!(
-            CoreCommandCompletion::replied(command_id, receipt()).result(),
+            CommandCompletionAuthority::new(command_id)
+                .replied(receipt())
+                .result(),
             Ok(CoreCompletionValue::Replied(value)) if *value == receipt()
         ));
         assert!(matches!(
-            CoreCommandCompletion::reply_aborted(command_id, receipt()).result(),
+            CommandCompletionAuthority::new(command_id)
+                .reply_aborted(receipt())
+                .result(),
             Ok(CoreCompletionValue::ReplyAborted(value)) if *value == receipt()
         ));
         assert!(matches!(
-            CoreCommandCompletion::reply_abandoned(command_id).result(),
+            CommandCompletionAuthority::new(command_id)
+                .reply_abandoned()
+                .result(),
             Ok(CoreCompletionValue::ReplyAbandoned)
         ));
         assert!(matches!(
-            CoreCommandCompletion::secondary(command_id, secondary()).result(),
+            CommandCompletionAuthority::new(command_id)
+                .secondary(secondary())
+                .result(),
             Ok(CoreCompletionValue::Secondary(value))
                 if value.stream().get() == 3 && value.function().get() == 4
         ));
-        let completed = CoreCommandCompletion::control_completed(command_id);
+        let completed = CommandCompletionAuthority::new(command_id).control_completed();
         assert_eq!(completed.command_id(), command_id);
         assert!(matches!(
             completed.into_result(),
@@ -197,8 +246,8 @@ mod tests {
     #[test]
     fn failure_completion_preserves_operation_error() {
         let command_id = CommandId::new(6);
-        let completion =
-            CoreCommandCompletion::failed(command_id, OperationError::ReplyCapabilityUnavailable);
+        let completion = CommandCompletionAuthority::new(command_id)
+            .failed(OperationError::ReplyCapabilityUnavailable);
 
         assert_eq!(completion.command_id(), command_id);
         assert_eq!(

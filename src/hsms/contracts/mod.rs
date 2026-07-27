@@ -30,15 +30,20 @@ pub(crate) use message::{ReplyTokenClaim, ReplyTokenIssuer, ValidatedReplyTokenC
 #[allow(unused_imports)]
 pub(crate) use command::CoreCommand;
 #[allow(unused_imports)]
-pub(crate) use completion::{CoreCommandCompletion, CoreCompletionValue};
+pub(crate) use completion::{
+    CommandCompletionAuthority, CoreCommandCompletion, CoreCompletionValue,
+};
 #[allow(unused_imports)]
 pub(crate) use core_effect::CoreEffect;
 #[allow(unused_imports)]
 pub(crate) use core_input::{ApplicationDeliveryResult, CoreEvent, CoreInput, ShutdownKind};
+#[cfg(test)]
+pub(crate) use orchestration::OutboundMessageShapeError;
 #[allow(unused_imports)]
 pub(crate) use orchestration::{
     DeliveryPurpose, OperationOwner, OutboundCorrelationState, OutboundHeaderIdentity,
-    OutboundRole, RejectCorrelationEligibility, RejectReference, RejectSelector,
+    OutboundOperationKind, OutboundRole, RejectCorrelationEligibility, RejectReference,
+    RejectSelector,
 };
 #[allow(unused_imports)]
 pub(crate) use write::{DataGateState, PeerResponseCommit, ScheduleFailure, WriteClass};

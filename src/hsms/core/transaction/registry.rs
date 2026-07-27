@@ -6,6 +6,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::hsms::{
+    core::resources::authority::PeerRejectMutationAuthority,
     model::{
         ids::{ConnectionGeneration, Function, OperationId, SessionId, Stream, SystemBytes},
         runtime::TimerToken,
@@ -143,6 +144,25 @@ pub(crate) enum TombstoneArrival {
     Duplicate,
     /// A valid correlated response arrived after another terminal outcome.
     Late,
+}
+
+/// Read-only Registry ownership state for one generation-local OperationId.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RegistryOperationState {
+    /// One live request, one-way lease, or control transaction owns the ID.
+    Live {
+        /// Exact live Registry ownership class.
+        class: OperationClass,
+        /// Strongest conservative peer-visibility evidence.
+        visibility: OperationVisibility,
+    },
+    /// A retained tombstone remembers the terminal Operation identity.
+    Terminal {
+        /// Exact terminal category retained by Registry.
+        category: TombstoneCategory,
+    },
+    /// Registry has no live or terminal ownership for the Operation identity.
+    Absent,
 }
 
 /// Successful atomic reservation of one W=1 Data request.
@@ -567,11 +587,58 @@ pub(crate) enum ControlTakeDecision {
     NoPending,
 }
 
+/// Unique proof that the transaction registry released one peer-Reject target.
+///
+/// Only the transaction registry constructs this value after atomically removing
+/// the exact live owner. Consumers may inspect the proof but cannot forge it.
+#[must_use = "a registry-release proof must be committed to the operation ledger"]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PeerRejectRegistryRelease {
+    /// Exact operation removed from the transaction registry.
+    operation_id: OperationId,
+    /// Exact transaction class owned by the removed operation.
+    class: OperationClass,
+}
+
+impl PeerRejectRegistryRelease {
+    /// Creates a release proof from facts owned by the transaction registry.
+    ///
+    /// `operation_id` and `class` must come from the entry removed by the same
+    /// registry transition. Returns the unique proof for cross-ledger commit.
+    const fn new(operation_id: OperationId, class: OperationClass) -> Self {
+        Self {
+            operation_id,
+            class,
+        }
+    }
+
+    /// Returns the exact operation released by the transaction registry.
+    pub(crate) const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+
+    /// Returns the exact transaction class released by the registry.
+    pub(crate) const fn class(&self) -> OperationClass {
+        self.class
+    }
+
+    /// Creates a release proof for isolated operation-ledger tests.
+    ///
+    /// `operation_id` and `class` describe the simulated registry release.
+    #[cfg(test)]
+    pub(crate) const fn for_test(operation_id: OperationId, class: OperationClass) -> Self {
+        Self::new(operation_id, class)
+    }
+}
+
 /// Result of owner-targeted termination by one exact peer Reject.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "a peer-Reject finish decision may carry a unique release proof"]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum PeerRejectFinishDecision {
     /// The exact visible operation was removed and tombstoned.
     Finished {
+        /// Move-only proof that the Registry removed this exact owner.
+        release: PeerRejectRegistryRelease,
         /// Operation terminated by the peer Reject.
         operation_id: OperationId,
         /// System Bytes retained by the mandatory tombstone.
@@ -933,6 +1000,24 @@ impl TransactionRegistry {
         self.tombstones.len()
     }
 
+    /// Returns live, terminal, or absent Registry ownership for one OperationId.
+    ///
+    /// `CoreResources` uses this read-only preflight to prove that an
+    /// Operation kind declaring no Registry binding does not collide with an
+    /// independently retained Registry owner before peer-Reject mutation.
+    pub(crate) fn operation_state(&self, operation_id: OperationId) -> RegistryOperationState {
+        if let Some(locator) = self.operations.get(&operation_id).copied() {
+            return RegistryOperationState::Live {
+                class: locator.class(),
+                visibility: self.visibility(locator),
+            };
+        }
+        self.terminal_category_for_operation(operation_id)
+            .map_or(RegistryOperationState::Absent, |category| {
+                RegistryOperationState::Terminal { category }
+            })
+    }
+
     /// Atomically validates, allocates, compiles, and registers a W=1 request.
     ///
     /// `function` must be an odd primary within 1..=253. Failure leaves every
@@ -1220,6 +1305,7 @@ impl TransactionRegistry {
     /// duplicates that semantic completion payload.
     pub(crate) fn finish_peer_rejected(
         &mut self,
+        _authority: &mut PeerRejectMutationAuthority,
         operation_id: OperationId,
         expected_class: OperationClass,
     ) -> PeerRejectFinishDecision {
@@ -1246,6 +1332,7 @@ impl TransactionRegistry {
             .expect("peer Reject target was located immediately before removal");
         self.insert_tombstone(removed, TombstoneCategory::PeerRejected);
         PeerRejectFinishDecision::Finished {
+            release: PeerRejectRegistryRelease::new(removed.operation_id, removed.class),
             operation_id: removed.operation_id,
             system_bytes: removed.system_bytes,
             class: removed.class,
@@ -1928,7 +2015,10 @@ mod tests {
     use std::collections::HashSet;
 
     use crate::{
-        hsms::{model::ids::TimerId, protocol::header::DataHeader},
+        hsms::{
+            core::resources::authority::PeerRejectMutationAuthority, model::ids::TimerId,
+            protocol::header::DataHeader,
+        },
         secs2::SecsItem,
     };
 
@@ -1967,6 +2057,16 @@ mod tests {
                 Function::new(1),
             )
             .expect("request reservation")
+    }
+
+    /// Executes the capability-gated Registry half of peer-Reject handling in isolation.
+    fn finish_peer_rejected(
+        registry: &mut TransactionRegistry,
+        operation_id: OperationId,
+        expected_class: OperationClass,
+    ) -> PeerRejectFinishDecision {
+        let mut authority = PeerRejectMutationAuthority::for_test();
+        registry.finish_peer_rejected(&mut authority, operation_id, expected_class)
     }
 
     /// Builds a semantic Data message from explicit header fields and no body.
@@ -2631,13 +2731,21 @@ mod tests {
         registry.mark_committed(request.operation_id(), token);
 
         assert_eq!(
-            registry.finish_peer_rejected(request.operation_id(), OperationClass::Request),
+            finish_peer_rejected(
+                &mut registry,
+                request.operation_id(),
+                OperationClass::Request,
+            ),
             PeerRejectFinishDecision::Finished {
                 operation_id: request.operation_id(),
                 system_bytes: request.system_bytes(),
                 class: OperationClass::Request,
                 visibility: OperationVisibility::Committed,
                 cancel_timer: Some(token),
+                release: PeerRejectRegistryRelease::for_test(
+                    request.operation_id(),
+                    OperationClass::Request,
+                ),
             }
         );
         assert_eq!(registry.expire_t3(token), ExpiryDecision::Stale);
@@ -2659,7 +2767,11 @@ mod tests {
             }
         ));
         assert_eq!(
-            registry.finish_peer_rejected(request.operation_id(), OperationClass::Request),
+            finish_peer_rejected(
+                &mut registry,
+                request.operation_id(),
+                OperationClass::Request,
+            ),
             PeerRejectFinishDecision::AlreadyTerminal {
                 category: TombstoneCategory::PeerRejected,
             }
@@ -2677,7 +2789,8 @@ mod tests {
         registry.mark_visible(one_way.operation_id());
 
         assert_eq!(
-            registry.finish_peer_rejected(
+            finish_peer_rejected(
+                &mut registry,
                 one_way.operation_id(),
                 OperationClass::OneWay(OneWayKind::Data),
             ),
@@ -2687,6 +2800,10 @@ mod tests {
                 class: OperationClass::OneWay(OneWayKind::Data),
                 visibility: OperationVisibility::MayBeVisible,
                 cancel_timer: None,
+                release: PeerRejectRegistryRelease::for_test(
+                    one_way.operation_id(),
+                    OperationClass::OneWay(OneWayKind::Data),
+                ),
             }
         );
         assert_eq!(
@@ -2706,7 +2823,8 @@ mod tests {
         let token = t6(2);
         registry.mark_committed(control.operation_id(), token);
         assert_eq!(
-            registry.finish_peer_rejected(
+            finish_peer_rejected(
+                &mut registry,
                 control.operation_id(),
                 OperationClass::Control(ControlKind::Linktest),
             ),
@@ -2716,6 +2834,10 @@ mod tests {
                 class: OperationClass::Control(ControlKind::Linktest),
                 visibility: OperationVisibility::Committed,
                 cancel_timer: Some(token),
+                release: PeerRejectRegistryRelease::for_test(
+                    control.operation_id(),
+                    OperationClass::Control(ControlKind::Linktest),
+                ),
             }
         );
         assert_eq!(registry.expire_control(token), ExpiryDecision::Stale);
@@ -2738,11 +2860,16 @@ mod tests {
         let request = reserve_request(&mut registry, 1);
 
         assert_eq!(
-            registry.finish_peer_rejected(OperationId::new(999), OperationClass::Request),
+            finish_peer_rejected(
+                &mut registry,
+                OperationId::new(999),
+                OperationClass::Request,
+            ),
             PeerRejectFinishDecision::UnknownOperation
         );
         assert_eq!(
-            registry.finish_peer_rejected(
+            finish_peer_rejected(
+                &mut registry,
                 request.operation_id(),
                 OperationClass::Control(ControlKind::Select),
             ),
@@ -2752,7 +2879,11 @@ mod tests {
             }
         );
         assert_eq!(
-            registry.finish_peer_rejected(request.operation_id(), OperationClass::Request),
+            finish_peer_rejected(
+                &mut registry,
+                request.operation_id(),
+                OperationClass::Request,
+            ),
             PeerRejectFinishDecision::NotVisible {
                 class: OperationClass::Request,
             }
@@ -2762,7 +2893,11 @@ mod tests {
 
         registry.mark_visible(request.operation_id());
         assert!(matches!(
-            registry.finish_peer_rejected(request.operation_id(), OperationClass::Request),
+            finish_peer_rejected(
+                &mut registry,
+                request.operation_id(),
+                OperationClass::Request,
+            ),
             PeerRejectFinishDecision::Finished {
                 visibility: OperationVisibility::MayBeVisible,
                 cancel_timer: None,

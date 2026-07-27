@@ -8,20 +8,33 @@ use crate::hsms::{
     model::ids::{CommandId, ReplyCapabilityId, SystemBytes},
     protocol::{
         header::{ControlMessage, DataHeader, RejectReason},
-        message::ProtocolMessage,
+        message::{DataMessage, ProtocolMessage},
     },
 };
 
+use super::completion::CommandCompletionAuthority;
+
 /// Whether one Core operation belongs to an application command.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "an operation owner must be retained as part of its operation specification"]
 pub(crate) enum OperationOwner {
     /// Accepted application command that must complete exactly once.
     Command(
-        /// Admission-assigned command identity.
-        CommandId,
+        /// Move-only authority transferred from command admission.
+        CommandCompletionAuthority,
     ),
     /// Protocol work initiated internally without an application completion.
     Autonomous,
+}
+
+impl OperationOwner {
+    /// Returns the command identity used for uniqueness indexing, if present.
+    pub(crate) const fn command_id(&self) -> Option<CommandId> {
+        match self {
+            Self::Command(authority) => Some(authority.command_id()),
+            Self::Autonomous => None,
+        }
+    }
 }
 
 /// Why one reliable application publication must be correlated.
@@ -53,6 +66,64 @@ pub(crate) enum OutboundRole {
     RejectRequest,
 }
 
+/// Exact typed outbound message form used by operation admission.
+///
+/// This classification is derived exhaustively from [`ProtocolMessage`].
+/// Operation code cannot construct it independently from coarse role fields,
+/// preventing W-bit or control-request kind mismatches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum OutboundOperationKind {
+    /// Odd-function Data Primary with W=false.
+    DataPrimaryW0,
+    /// Odd-function Data Primary with W=true.
+    DataPrimaryW1,
+    /// Non-zero even-function Data Secondary with the required W=false bit.
+    DataSecondaryW0,
+    /// Non-zero even-function Data shape carrying an invalid W=true bit.
+    DataSecondaryW1,
+    /// Header-only semantic SxF0 Data abort response with W=false.
+    DataAbortW0,
+    /// Header-only SxF0 Data shape carrying an invalid W=true bit.
+    DataAbortW1,
+    /// `Select.req` transactional control request.
+    SelectRequest,
+    /// `Select.rsp` control response.
+    SelectResponse,
+    /// `Deselect.req` transactional control request.
+    DeselectRequest,
+    /// `Deselect.rsp` control response.
+    DeselectResponse,
+    /// `Linktest.req` transactional control request.
+    LinktestRequest,
+    /// `Linktest.rsp` control response.
+    LinktestResponse,
+    /// Locally generated `Reject.req`.
+    RejectRequest,
+    /// One-way `Separate.req`.
+    SeparateRequest,
+}
+
+impl OutboundOperationKind {
+    /// Returns the coarse Reject-compatibility role derived from this exact kind.
+    pub(crate) const fn role(self) -> OutboundRole {
+        match self {
+            Self::DataPrimaryW0 | Self::DataPrimaryW1 => OutboundRole::DataPrimary,
+            Self::DataSecondaryW0
+            | Self::DataSecondaryW1
+            | Self::DataAbortW0
+            | Self::DataAbortW1 => OutboundRole::DataResponse,
+            Self::SelectRequest
+            | Self::DeselectRequest
+            | Self::LinktestRequest
+            | Self::SeparateRequest => OutboundRole::ControlRequest,
+            Self::SelectResponse | Self::DeselectResponse | Self::LinktestResponse => {
+                OutboundRole::ControlResponse
+            }
+            Self::RejectRequest => OutboundRole::RejectRequest,
+        }
+    }
+}
+
 /// Complete immutable header identity required for peer Reject attribution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct OutboundHeaderIdentity {
@@ -64,8 +135,16 @@ pub(crate) struct OutboundHeaderIdentity {
     s_type: u8,
     /// Four-byte outbound correlation copied into the header.
     system_bytes: SystemBytes,
-    /// Semantic outbound role used to validate reason compatibility.
-    role: OutboundRole,
+    /// Exact outbound message kind derived from the typed protocol value.
+    kind: OutboundOperationKind,
+}
+
+/// Invalid semantic shape found while classifying a complete outbound message.
+#[must_use = "an outbound message-shape error must be handled"]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OutboundMessageShapeError {
+    /// Function-zero Data messages must not carry SECS-II Message Text.
+    AbortCarriesBody,
 }
 
 impl OutboundHeaderIdentity {
@@ -76,19 +155,51 @@ impl OutboundHeaderIdentity {
     /// derive Primary versus response role from the SECS function. Every
     /// current control variant maps exhaustively to its fixed E37 SType and
     /// request, response, or Reject role.
-    pub(crate) fn from_protocol_message(message: &ProtocolMessage) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OutboundMessageShapeError::AbortCarriesBody`] when an SxF0
+    /// Data message incorrectly carries SECS-II Message Text.
+    pub(crate) fn from_protocol_message(
+        message: &ProtocolMessage,
+    ) -> Result<Self, OutboundMessageShapeError> {
         match message {
-            ProtocolMessage::Data(message) => Self::from_data_header(message.header()),
-            ProtocolMessage::Control(message) => Self::from_control_message(*message),
+            ProtocolMessage::Data(message) => Self::from_data_message(message),
+            ProtocolMessage::Control(message) => Ok(Self::from_control_message(*message)),
         }
     }
 
-    /// Derives the fixed HSMS-SS identity and semantic role of a Data header.
+    /// Derives an outbound identity only from a semantically valid complete Data message.
+    ///
+    /// `message` supplies both the fixed header identity and Message Text presence.
+    /// Returns a structured error instead of classifying an invalid body-bearing
+    /// SxF0 message as a valid transaction Abort.
+    fn from_data_message(message: &DataMessage) -> Result<Self, OutboundMessageShapeError> {
+        if message.header().function().get() == 0 && message.body().is_some() {
+            return Err(OutboundMessageShapeError::AbortCarriesBody);
+        }
+        Ok(Self::from_data_header(message.header()))
+    }
+
+    /// Derives the fixed HSMS-SS identity and exact operation kind of a Data header.
     const fn from_data_header(header: DataHeader) -> Self {
-        let role = if header.function().get() % 2 == 1 {
-            OutboundRole::DataPrimary
+        let function = header.function().get();
+        let kind = if function % 2 == 1 {
+            if header.reply_expected() {
+                OutboundOperationKind::DataPrimaryW1
+            } else {
+                OutboundOperationKind::DataPrimaryW0
+            }
+        } else if function == 0 {
+            if header.reply_expected() {
+                OutboundOperationKind::DataAbortW1
+            } else {
+                OutboundOperationKind::DataAbortW0
+            }
+        } else if header.reply_expected() {
+            OutboundOperationKind::DataSecondaryW1
         } else {
-            OutboundRole::DataResponse
+            OutboundOperationKind::DataSecondaryW0
         };
 
         Self {
@@ -96,7 +207,7 @@ impl OutboundHeaderIdentity {
             p_type: 0,
             s_type: 0,
             system_bytes: header.system_bytes(),
-            role,
+            kind,
         }
     }
 
@@ -111,7 +222,7 @@ impl OutboundHeaderIdentity {
                 p_type: 0,
                 s_type: 1,
                 system_bytes,
-                role: OutboundRole::ControlRequest,
+                kind: OutboundOperationKind::SelectRequest,
             },
             ControlMessage::SelectResponse {
                 session_id,
@@ -122,7 +233,7 @@ impl OutboundHeaderIdentity {
                 p_type: 0,
                 s_type: 2,
                 system_bytes,
-                role: OutboundRole::ControlResponse,
+                kind: OutboundOperationKind::SelectResponse,
             },
             ControlMessage::DeselectRequest {
                 session_id,
@@ -132,7 +243,7 @@ impl OutboundHeaderIdentity {
                 p_type: 0,
                 s_type: 3,
                 system_bytes,
-                role: OutboundRole::ControlRequest,
+                kind: OutboundOperationKind::DeselectRequest,
             },
             ControlMessage::DeselectResponse {
                 session_id,
@@ -143,21 +254,21 @@ impl OutboundHeaderIdentity {
                 p_type: 0,
                 s_type: 4,
                 system_bytes,
-                role: OutboundRole::ControlResponse,
+                kind: OutboundOperationKind::DeselectResponse,
             },
             ControlMessage::LinktestRequest { system_bytes } => Self {
                 session_id: u16::MAX,
                 p_type: 0,
                 s_type: 5,
                 system_bytes,
-                role: OutboundRole::ControlRequest,
+                kind: OutboundOperationKind::LinktestRequest,
             },
             ControlMessage::LinktestResponse { system_bytes } => Self {
                 session_id: u16::MAX,
                 p_type: 0,
                 s_type: 6,
                 system_bytes,
-                role: OutboundRole::ControlResponse,
+                kind: OutboundOperationKind::LinktestResponse,
             },
             ControlMessage::RejectRequest {
                 session_id,
@@ -168,7 +279,7 @@ impl OutboundHeaderIdentity {
                 p_type: 0,
                 s_type: 7,
                 system_bytes,
-                role: OutboundRole::RejectRequest,
+                kind: OutboundOperationKind::RejectRequest,
             },
             ControlMessage::SeparateRequest {
                 session_id,
@@ -178,7 +289,7 @@ impl OutboundHeaderIdentity {
                 p_type: 0,
                 s_type: 9,
                 system_bytes,
-                role: OutboundRole::ControlRequest,
+                kind: OutboundOperationKind::SeparateRequest,
             },
         }
     }
@@ -203,9 +314,14 @@ impl OutboundHeaderIdentity {
         self.system_bytes
     }
 
+    /// Returns the exact outbound operation kind.
+    pub(crate) const fn kind(self) -> OutboundOperationKind {
+        self.kind
+    }
+
     /// Returns the semantic role of the outbound message.
     pub(crate) const fn role(self) -> OutboundRole {
-        self.role
+        self.kind.role()
     }
 }
 
@@ -417,6 +533,8 @@ impl RejectReference {
 
 #[cfg(test)]
 mod tests {
+    use super::OutboundMessageShapeError;
+
     use crate::hsms::{
         model::ids::{ConnectionGeneration, Function, SessionId, Stream, SystemBytes},
         protocol::{
@@ -426,7 +544,7 @@ mod tests {
     };
 
     use super::{
-        OutboundCorrelationState, OutboundHeaderIdentity, OutboundRole,
+        OutboundCorrelationState, OutboundHeaderIdentity, OutboundOperationKind, OutboundRole,
         RejectCorrelationEligibility, RejectReference, RejectSelector,
     };
 
@@ -442,16 +560,17 @@ mod tests {
         OutboundHeaderIdentity::from_protocol_message(&ProtocolMessage::Data(DataMessage::new(
             header, None,
         )))
+        .expect("valid outbound message shape")
     }
 
     /// Creates one deterministic typed Data protocol message.
-    fn data_message(function: u8) -> ProtocolMessage {
+    fn data_message(function: u8, reply_expected: bool) -> ProtocolMessage {
         ProtocolMessage::Data(DataMessage::new(
             DataHeader::new(
                 SessionId::new(7).expect("non-control Session ID"),
                 Stream::new(3).expect("seven-bit stream"),
                 Function::new(function),
-                false,
+                reply_expected,
                 SystemBytes::new(0x0102_0304),
             ),
             None,
@@ -459,26 +578,80 @@ mod tests {
     }
 
     /// Confirms Data identities cannot disagree with the typed HSMS-SS header
-    /// and derive Primary versus response role from SECS function parity.
+    /// and distinguish W=0 Primary, W=1 Primary, Secondary, and SxF0 exactly.
     #[test]
     fn data_identity_is_derived_from_typed_protocol_message() {
-        for (function, expected_role) in [
-            (1, OutboundRole::DataPrimary),
-            (2, OutboundRole::DataResponse),
-            (0, OutboundRole::DataResponse),
+        for (function, reply_expected, expected_kind, expected_role) in [
+            (
+                1,
+                false,
+                OutboundOperationKind::DataPrimaryW0,
+                OutboundRole::DataPrimary,
+            ),
+            (
+                1,
+                true,
+                OutboundOperationKind::DataPrimaryW1,
+                OutboundRole::DataPrimary,
+            ),
+            (
+                2,
+                false,
+                OutboundOperationKind::DataSecondaryW0,
+                OutboundRole::DataResponse,
+            ),
+            (
+                2,
+                true,
+                OutboundOperationKind::DataSecondaryW1,
+                OutboundRole::DataResponse,
+            ),
+            (
+                0,
+                false,
+                OutboundOperationKind::DataAbortW0,
+                OutboundRole::DataResponse,
+            ),
+            (
+                0,
+                true,
+                OutboundOperationKind::DataAbortW1,
+                OutboundRole::DataResponse,
+            ),
         ] {
-            let identity = OutboundHeaderIdentity::from_protocol_message(&data_message(function));
+            let identity = OutboundHeaderIdentity::from_protocol_message(&data_message(
+                function,
+                reply_expected,
+            ))
+            .expect("typed outbound message shape");
 
             assert_eq!(identity.session_id(), 7);
             assert_eq!(identity.p_type(), 0);
             assert_eq!(identity.s_type(), 0);
             assert_eq!(identity.system_bytes(), SystemBytes::new(0x0102_0304));
+            assert_eq!(identity.kind(), expected_kind);
             assert_eq!(identity.role(), expected_role);
         }
     }
 
-    /// Confirms every current typed control variant derives its fixed E37
-    /// Session ID, PType, SType, System Bytes, and semantic role.
+    /// Rejects a body-bearing SxF0 before an operation can retain its identity.
+    #[test]
+    fn body_bearing_abort_is_rejected_before_identity_construction() {
+        let ProtocolMessage::Data(abort) = data_message(0, false) else {
+            panic!("the Data-message helper must construct a Data variant");
+        };
+        let invalid = ProtocolMessage::Data(DataMessage::new(
+            abort.header(),
+            Some(crate::secs2::SecsItem::Binary(vec![1])),
+        ));
+
+        assert_eq!(
+            OutboundHeaderIdentity::from_protocol_message(&invalid),
+            Err(OutboundMessageShapeError::AbortCarriesBody)
+        );
+    }
+
+    /// Confirms every typed control message maps to its exact fixed identity.
     #[test]
     fn control_identity_mapping_is_exhaustive_and_type_derived() {
         let system_bytes = SystemBytes::new(0x1122_3344);
@@ -490,6 +663,7 @@ mod tests {
                 },
                 7,
                 1,
+                OutboundOperationKind::SelectRequest,
                 OutboundRole::ControlRequest,
             ),
             (
@@ -500,6 +674,7 @@ mod tests {
                 },
                 8,
                 2,
+                OutboundOperationKind::SelectResponse,
                 OutboundRole::ControlResponse,
             ),
             (
@@ -509,6 +684,7 @@ mod tests {
                 },
                 9,
                 3,
+                OutboundOperationKind::DeselectRequest,
                 OutboundRole::ControlRequest,
             ),
             (
@@ -519,18 +695,21 @@ mod tests {
                 },
                 10,
                 4,
+                OutboundOperationKind::DeselectResponse,
                 OutboundRole::ControlResponse,
             ),
             (
                 ControlMessage::LinktestRequest { system_bytes },
                 u16::MAX,
                 5,
+                OutboundOperationKind::LinktestRequest,
                 OutboundRole::ControlRequest,
             ),
             (
                 ControlMessage::LinktestResponse { system_bytes },
                 u16::MAX,
                 6,
+                OutboundOperationKind::LinktestResponse,
                 OutboundRole::ControlResponse,
             ),
             (
@@ -542,6 +721,7 @@ mod tests {
                 },
                 11,
                 7,
+                OutboundOperationKind::RejectRequest,
                 OutboundRole::RejectRequest,
             ),
             (
@@ -551,18 +731,21 @@ mod tests {
                 },
                 12,
                 9,
+                OutboundOperationKind::SeparateRequest,
                 OutboundRole::ControlRequest,
             ),
         ];
 
-        for (message, expected_session, expected_s_type, expected_role) in cases {
+        for (message, expected_session, expected_s_type, expected_kind, expected_role) in cases {
             let identity =
-                OutboundHeaderIdentity::from_protocol_message(&ProtocolMessage::Control(message));
+                OutboundHeaderIdentity::from_protocol_message(&ProtocolMessage::Control(message))
+                    .expect("typed outbound message shape");
 
             assert_eq!(identity.session_id(), expected_session);
             assert_eq!(identity.p_type(), 0);
             assert_eq!(identity.s_type(), expected_s_type);
             assert_eq!(identity.system_bytes(), system_bytes);
+            assert_eq!(identity.kind(), expected_kind);
             assert_eq!(identity.role(), expected_role);
         }
     }
