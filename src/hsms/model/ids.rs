@@ -160,6 +160,12 @@ internal_id!(
     "Identifies one single-use authority to reply to an inbound primary."
 );
 internal_id!(
+    ReplyCapabilityIncarnation,
+    "Identifies the exact ledger reservation behind one opaque reply token. \
+     The value is crate-private, never appears in public diagnostics, never \
+     wraps, and is never reused during a reply ledger's lifetime."
+);
+internal_id!(
     TimerId,
     "Identifies one timer registration independently of its timeout kind."
 );

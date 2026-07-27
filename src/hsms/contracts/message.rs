@@ -6,10 +6,12 @@
 
 #![allow(dead_code)]
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use crate::{
-    hsms::model::ids::{ConnectionGeneration, Function, ReplyCapabilityId, Stream},
+    hsms::model::ids::{
+        ConnectionGeneration, Function, ReplyCapabilityId, ReplyCapabilityIncarnation, Stream,
+    },
     secs2::SecsItem,
 };
 
@@ -117,40 +119,158 @@ impl SecondaryMessage {
 /// Single-use capability for responding to an inbound W=1 Primary.
 #[must_use = "reply, abort, or explicitly abandon this inbound reply capability"]
 pub struct ReplyToken {
+    /// Unforgeable ledger-instance brand shared only with its owning issuer.
+    brand: Arc<ReplyTokenBrand>,
     /// Opaque identity used to consume this reply authority exactly once.
     capability_id: ReplyCapabilityId,
     /// TCP incarnation on which the inbound primary was received.
     generation: ConnectionGeneration,
+    /// Private exact-reservation identity that closes capability-ID ABA.
+    incarnation: ReplyCapabilityIncarnation,
     /// Private admission hint; the Core ledger remains authoritative.
     normal_secondary_available: bool,
 }
 
-impl ReplyToken {
-    /// Creates the single-use reply authority identified by `capability_id`.
-    ///
-    /// `normal_secondary_available` lets admission return an abort-only token
-    /// before ownership transfer. The Core ledger validates the mode again;
-    /// header correlation remains exclusively in that ledger.
-    pub(crate) const fn new(
+/// Private allocation whose pointer identity brands one reply ledger instance.
+struct ReplyTokenBrand {
+    /// Prevents construction outside this neutral contract module.
+    private: (),
+}
+
+/// Move-only mint retained privately by exactly one reply ledger instance.
+///
+/// Other crate modules may create independent issuers, but their brands cannot
+/// validate against an existing ledger. The issuer intentionally implements
+/// neither [`Clone`] nor [`Copy`].
+pub(crate) struct ReplyTokenIssuer {
+    /// Unique allocation shared by tokens minted for this issuer.
+    brand: Arc<ReplyTokenBrand>,
+}
+
+impl ReplyTokenIssuer {
+    /// Creates a fresh issuer whose brand cannot equal any live issuer brand.
+    pub(crate) fn new() -> Self {
+        Self {
+            brand: Arc::new(ReplyTokenBrand { private: () }),
+        }
+    }
+
+    /// Mints one move-only token carrying this issuer's unforgeable brand.
+    pub(crate) fn issue(
+        &self,
         capability_id: ReplyCapabilityId,
         generation: ConnectionGeneration,
+        incarnation: ReplyCapabilityIncarnation,
+        normal_secondary_available: bool,
+    ) -> ReplyToken {
+        ReplyToken::from_issuer(
+            Arc::clone(&self.brand),
+            capability_id,
+            generation,
+            incarnation,
+            normal_secondary_available,
+        )
+    }
+
+    /// Opens a consumed claim only when it carries this exact issuer brand.
+    ///
+    /// A foreign claim is returned intact so validation itself does not expose
+    /// or copy its private numeric identity.
+    pub(crate) fn validate_claim(
+        &self,
+        claim: ReplyTokenClaim,
+    ) -> Result<ValidatedReplyTokenClaim, ReplyTokenClaim> {
+        if !Arc::ptr_eq(&self.brand, &claim.brand) {
+            return Err(claim);
+        }
+        Ok(ValidatedReplyTokenClaim {
+            capability_id: claim.capability_id,
+            generation: claim.generation,
+            incarnation: claim.incarnation,
+        })
+    }
+}
+
+/// Move-only token identity after the public application token is consumed.
+///
+/// Fields remain opaque until the owning issuer validates the private brand.
+#[must_use = "a consumed reply token claim must be validated by its owning ledger"]
+pub(crate) struct ReplyTokenClaim {
+    /// Ledger-instance brand moved out of the application token.
+    brand: Arc<ReplyTokenBrand>,
+    /// Opaque capability ID moved out of the application token.
+    capability_id: ReplyCapabilityId,
+    /// TCP generation moved out of the application token.
+    generation: ConnectionGeneration,
+    /// Exact reservation incarnation moved out of the application token.
+    incarnation: ReplyCapabilityIncarnation,
+}
+
+/// Numeric identity released only after issuer-brand validation succeeds.
+#[must_use = "validated token identity must be matched against the live ledger entry"]
+pub(crate) struct ValidatedReplyTokenClaim {
+    /// Opaque capability ID proven to carry the owning ledger's brand.
+    capability_id: ReplyCapabilityId,
+    /// TCP generation proven to carry the owning ledger's brand.
+    generation: ConnectionGeneration,
+    /// Reservation incarnation proven to carry the owning ledger's brand.
+    incarnation: ReplyCapabilityIncarnation,
+}
+
+impl ValidatedReplyTokenClaim {
+    /// Consumes the validated claim and returns its exact ledger lookup identity.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        ConnectionGeneration,
+        ReplyCapabilityId,
+        ReplyCapabilityIncarnation,
+    ) {
+        (self.generation, self.capability_id, self.incarnation)
+    }
+}
+
+impl ReplyToken {
+    /// Constructs a token from an issuer-owned brand inside this module only.
+    fn from_issuer(
+        brand: Arc<ReplyTokenBrand>,
+        capability_id: ReplyCapabilityId,
+        generation: ConnectionGeneration,
+        incarnation: ReplyCapabilityIncarnation,
         normal_secondary_available: bool,
     ) -> Self {
         Self {
+            brand,
             capability_id,
             generation,
+            incarnation,
             normal_secondary_available,
         }
     }
 
-    /// Returns the identity used to consume this authority exactly once.
-    pub(crate) const fn capability_id(&self) -> ReplyCapabilityId {
-        self.capability_id
+    /// Creates a deterministic foreign-brand token for crate-internal unit tests.
+    #[cfg(test)]
+    pub(crate) fn new(
+        capability_id: ReplyCapabilityId,
+        generation: ConnectionGeneration,
+        normal_secondary_available: bool,
+    ) -> Self {
+        ReplyTokenIssuer::new().issue(
+            capability_id,
+            generation,
+            ReplyCapabilityIncarnation::new(1),
+            normal_secondary_available,
+        )
     }
 
-    /// Returns the TCP generation on which the primary arrived.
-    pub(crate) const fn generation(&self) -> ConnectionGeneration {
-        self.generation
+    /// Consumes this move-only token into a claim for issuer-brand validation.
+    pub(crate) fn into_claim(self) -> ReplyTokenClaim {
+        ReplyTokenClaim {
+            brand: self.brand,
+            capability_id: self.capability_id,
+            generation: self.generation,
+            incarnation: self.incarnation,
+        }
     }
 
     /// Returns the private pre-Core admission hint for a normal Secondary.
@@ -262,7 +382,7 @@ mod tests {
     }
 
     /// Confirms public token diagnostics expose only generation while keeping
-    /// capability identity and private reply-contract hints hidden.
+    /// capability identity, incarnation, and private reply-contract hints hidden.
     #[test]
     fn reply_token_debug_hides_capability_identity() {
         let token = ReplyToken::new(
@@ -275,6 +395,29 @@ mod tests {
         assert!(!token.normal_secondary_available());
         assert!(debug.contains("generation"));
         assert!(!debug.contains("normal_secondary_available"));
+        assert!(!debug.contains("incarnation"));
         assert!(!debug.contains("123456"));
+    }
+
+    /// Guards the production token API against reintroducing a crate-visible
+    /// raw constructor or borrowed numeric-identity accessors.
+    #[test]
+    fn reply_token_production_surface_requires_move_only_claim_validation() {
+        let source = include_str!("message.rs");
+        let forbidden_surfaces = [
+            concat!("pub(crate) fn ", "from_issuer"),
+            concat!("pub(crate) const fn ", "capability_id(&self)"),
+            concat!("pub(crate) const fn ", "generation(&self)"),
+            concat!("pub(crate) const fn ", "incarnation(&self)"),
+        ];
+
+        for forbidden in forbidden_surfaces {
+            assert!(
+                !source.contains(forbidden),
+                "production ReplyToken surface exposed forbidden API: {forbidden}"
+            );
+        }
+        assert!(source.contains("pub(crate) fn into_claim(self)"));
+        assert!(source.contains("Arc::ptr_eq"));
     }
 }

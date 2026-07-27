@@ -24,6 +24,8 @@ pub use endpoint_event::{
 pub use message::{
     DataEventToken, InboundPrimary, InboundToken, PrimaryMessage, ReplyToken, SecondaryMessage,
 };
+#[allow(unused_imports)]
+pub(crate) use message::{ReplyTokenClaim, ReplyTokenIssuer, ValidatedReplyTokenClaim};
 
 #[allow(unused_imports)]
 pub(crate) use command::CoreCommand;
