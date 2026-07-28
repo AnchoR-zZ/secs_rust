@@ -8,10 +8,16 @@
 use std::num::NonZeroU8;
 
 use crate::hsms::{
-    contracts::{ControlIntent, DataGateState, PeerResponseCommit},
+    contracts::{
+        peer_response::{
+            PeerResponseCommit, PeerResponseCommitIssuer, PeerResponseCommitReceipt,
+            PendingPeerResponseWrite,
+        },
+        ControlIntent, DataGateState,
+    },
     core::transaction::ControlKind,
     model::{
-        ids::{OperationId, SystemBytes},
+        ids::{ConnectionGeneration, OperationId, SystemBytes},
         runtime::{CommunicationsTimeoutKind, GenerationCloseReason, TimerToken},
     },
     protocol::header::{ControlMessage, DeselectStatus, SelectStatus},
@@ -78,7 +84,7 @@ pub(crate) enum CloseBarrier {
 }
 
 /// Ordered, runtime-neutral action emitted by the control reducer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ControlAction {
     /// Apply the Data scheduler gate synchronously.
     SetDataGate(
@@ -115,7 +121,7 @@ pub(crate) enum ControlAction {
 
 /// Ordered action vector produced by one serialized FSM decision.
 #[must_use = "HsmsCore must apply every ordered control action"]
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct ControlDecision {
     /// Actions Core must translate and execute in this exact order.
     actions: Vec<ControlAction>,
@@ -135,6 +141,7 @@ impl ControlDecision {
     }
 
     /// Borrows actions in the order Core must preserve.
+    #[cfg(test)]
     pub(crate) fn actions(&self) -> &[ControlAction] {
         &self.actions
     }
@@ -145,6 +152,7 @@ impl ControlDecision {
     }
 
     /// Returns whether applying the decision requires no external work.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.actions.is_empty()
     }
@@ -193,6 +201,70 @@ pub(crate) enum ControlInvariantError {
     T7AlreadyPresentWhileSelected,
     /// The accepted peer Deselect response fence arrived without its barrier.
     PeerDeselectCommitWithoutBarrier,
+    /// Peer-response authority belongs to another issuer instance or generation.
+    ForeignPeerResponseCommit,
+}
+
+/// Private selector used only while building a branded peer-response plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerResponseCommitIntent {
+    /// Response carries no deferred selection-state transition.
+    None,
+    /// Response commits peer Select acceptance.
+    SelectAccepted,
+    /// Response commits peer Deselect acceptance.
+    DeselectAccepted,
+}
+
+/// Successful FSM transition paired with its exact issuer-occurrence receipt.
+#[must_use = "the control decision and peer-response receipt must both be handled"]
+#[derive(Debug)]
+pub(crate) struct CommittedPeerResponse {
+    /// Control effects produced by the unchanged state-transition logic.
+    decision: ControlDecision,
+    /// Branded proof of the exact committed peer-response authority.
+    receipt: PeerResponseCommitReceipt,
+}
+
+impl CommittedPeerResponse {
+    /// Consumes the result into its decision and success proof.
+    ///
+    /// Returns `(decision, receipt)` for ordered Core application.
+    pub(crate) fn into_parts(self) -> (ControlDecision, PeerResponseCommitReceipt) {
+        (self.decision, self.receipt)
+    }
+}
+
+/// Move-only peer-response failure that returns authority without mutation loss.
+#[must_use = "a failed peer-response commit contains recoverable authority"]
+#[derive(Debug)]
+pub(crate) struct PeerResponseCommitFailure {
+    /// Exact invariant or instance-brand validation failure.
+    error: ControlInvariantError,
+    /// Original one-shot authority rejected by the ControlFsm.
+    commit: PeerResponseCommit,
+}
+
+impl PeerResponseCommitFailure {
+    /// Creates a failure while preserving the original authority.
+    const fn new(error: ControlInvariantError, commit: PeerResponseCommit) -> Self {
+        Self { error, commit }
+    }
+
+    /// Returns the structured invariant error without consuming authority.
+    pub(crate) const fn error(&self) -> ControlInvariantError {
+        self.error
+    }
+
+    /// Borrows the exact authority returned by the failed commit.
+    pub(crate) const fn commit(&self) -> &PeerResponseCommit {
+        &self.commit
+    }
+
+    /// Consumes the failure into its error and original authority.
+    pub(crate) fn into_parts(self) -> (ControlInvariantError, PeerResponseCommit) {
+        (self.error, self.commit)
+    }
 }
 
 /// Typed response already correlated exactly by `TransactionRegistry`.
@@ -214,7 +286,7 @@ pub(crate) enum MatchedControlResponse {
 
 /// Terminal result and state actions for one exactly matched local response.
 #[must_use = "the operation result and ordered state actions must both be handled"]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct LocalResponseDecision {
     /// Ordered state and timer actions caused by the response.
     state: ControlDecision,
@@ -244,16 +316,14 @@ impl LocalResponseDecision {
     }
 }
 
-/// Peer response plus the state work split across receipt and BeginWrite.
-#[must_use = "the response, immediate actions, and BeginWrite commit must be handled"]
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Immediate state work plus an inseparable peer-response write bundle.
+#[must_use = "the immediate actions and pending peer response must both be handled"]
+#[derive(Debug)]
 pub(crate) struct PeerResponsePlan {
     /// Actions that must complete before Core schedules the response.
     immediate: ControlDecision,
-    /// Fully typed response Core must schedule in the critical lane.
-    response: ControlMessage,
-    /// Transition token Core must retain in its WriteLedger.
-    commit: PeerResponseCommit,
+    /// Inseparable response message and transition authority for WriteLedger.
+    pending: PendingPeerResponseWrite,
 }
 
 impl PeerResponsePlan {
@@ -265,31 +335,29 @@ impl PeerResponsePlan {
 
     /// Borrows the typed response for focused reducer assertions.
     #[cfg(test)]
-    const fn response(&self) -> &ControlMessage {
-        &self.response
+    fn response(&self) -> ControlMessage {
+        self.pending.response_for_test()
     }
 
-    /// Returns the fence commit for focused reducer assertions.
+    /// Borrows the pending bundle for focused reducer assertions.
     #[cfg(test)]
-    const fn commit(&self) -> PeerResponseCommit {
-        self.commit
+    const fn pending(&self) -> &PendingPeerResponseWrite {
+        &self.pending
     }
 
     /// Consumes the plan in the order Core must preserve.
     ///
     /// Core must apply `immediate` completely before allocating and scheduling
-    /// `response`; `commit` is then retained beside that write until its
-    /// BeginWrite fence.
-    pub(crate) fn into_ordered_parts(
-        self,
-    ) -> (ControlDecision, ControlMessage, PeerResponseCommit) {
-        (self.immediate, self.response, self.commit)
+    /// the returned bundle. Only `WriteSpec::peer_response` may bind that bundle
+    /// to a write, so the exact response cannot be separated from its hook.
+    pub(crate) fn into_ordered_parts(self) -> (ControlDecision, PendingPeerResponseWrite) {
+        (self.immediate, self.pending)
     }
 }
 
 /// Complete FSM treatment of one peer control request.
 #[must_use = "peer requests require their response or action decision to be applied"]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum PeerRequestDecision {
     /// Schedule a mandatory typed response with its split transition plan.
     Respond {
@@ -305,6 +373,7 @@ pub(crate) enum PeerRequestDecision {
 
 impl PeerRequestDecision {
     /// Borrows a response plan when the request requires one.
+    #[cfg(test)]
     pub(crate) const fn response_plan(&self) -> Option<&PeerResponsePlan> {
         match self {
             Self::Respond { plan } => Some(plan),
@@ -313,6 +382,7 @@ impl PeerRequestDecision {
     }
 
     /// Borrows no-response actions when the request does not produce a frame.
+    #[cfg(test)]
     pub(crate) const fn no_response_decision(&self) -> Option<&ControlDecision> {
         match self {
             Self::Respond { .. } => None,
@@ -338,7 +408,7 @@ pub(crate) enum OverlayTerminalDecision {
 
 /// T6 result combining overlay cleanup classification and close actions.
 #[must_use = "T6 cleanup and generation-close actions must both be applied"]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ControlTimeoutDecision {
     /// Whether the timed-out operation cleared an exact selection overlay.
     overlay: OverlayTerminalDecision,
@@ -353,6 +423,7 @@ impl ControlTimeoutDecision {
     }
 
     /// Borrows ordered actions caused by the communications timeout.
+    #[cfg(test)]
     pub(crate) const fn close_decision(&self) -> &ControlDecision {
         &self.close
     }
@@ -366,6 +437,10 @@ impl ControlTimeoutDecision {
 /// Generation-local, single-threaded HSMS selection reducer.
 #[derive(Debug)]
 pub(crate) struct ControlFsm {
+    /// Exact connection generation served by this FSM instance.
+    generation: ConnectionGeneration,
+    /// Instance-local issuer for every deferred peer-response authority.
+    peer_response_issuer: PeerResponseCommitIssuer,
     /// Stable selection state exposed outside the reducer.
     state: SessionState,
     /// Projection of a locally initiated Select or Deselect operation.
@@ -383,10 +458,13 @@ impl ControlFsm {
     /// actions. A non-T7 token returns a structured error without constructing
     /// partial state.
     pub(crate) fn start(
+        generation: ConnectionGeneration,
         initial_t7: TimerToken,
     ) -> Result<(Self, ControlDecision), ControlInvariantError> {
         Self::validate_t7(initial_t7)?;
         let fsm = Self {
+            generation,
+            peer_response_issuer: PeerResponseCommitIssuer::new(generation),
             state: SessionState::NotSelected,
             overlay: SelectionOverlay::Idle,
             peer_deselect_pending: false,
@@ -643,7 +721,7 @@ impl ControlFsm {
         }
     }
 
-    /// Classifies `Select.req` and builds its typed response and fence token.
+    /// Classifies `Select.req` and builds its typed response write bundle.
     pub(crate) fn on_select_request(
         &self,
         session_id: u16,
@@ -657,13 +735,16 @@ impl ControlFsm {
             || matches!(self.overlay, SelectionOverlay::Deselecting { .. })
                 && self.state == SessionState::NotSelected
         {
-            (SelectStatus::NOT_READY, PeerResponseCommit::None)
+            (SelectStatus::NOT_READY, PeerResponseCommitIntent::None)
         } else if self.state == SessionState::Selected {
-            (SelectStatus::ALREADY_ACTIVE, PeerResponseCommit::None)
+            (SelectStatus::ALREADY_ACTIVE, PeerResponseCommitIntent::None)
         } else {
-            (SelectStatus::SUCCESS, PeerResponseCommit::SelectAccepted)
+            (
+                SelectStatus::SUCCESS,
+                PeerResponseCommitIntent::SelectAccepted,
+            )
         };
-        Self::peer_response(
+        self.peer_response(
             ControlDecision::empty(),
             ControlMessage::SelectResponse {
                 session_id,
@@ -687,24 +768,24 @@ impl ControlFsm {
         let (status, commit, immediate) = if self.peer_deselect_pending {
             (
                 DeselectStatus::BUSY,
-                PeerResponseCommit::None,
+                PeerResponseCommitIntent::None,
                 ControlDecision::empty(),
             )
         } else if self.state == SessionState::Selected {
             self.peer_deselect_pending = true;
             (
                 DeselectStatus::SUCCESS,
-                PeerResponseCommit::DeselectAccepted,
+                PeerResponseCommitIntent::DeselectAccepted,
                 ControlDecision::new(vec![ControlAction::SetDataGate(DataGateState::Closed)]),
             )
         } else {
             (
                 DeselectStatus::NOT_SELECTED,
-                PeerResponseCommit::None,
+                PeerResponseCommitIntent::None,
                 ControlDecision::empty(),
             )
         };
-        Self::peer_response(
+        self.peer_response(
             immediate,
             ControlMessage::DeselectResponse {
                 session_id,
@@ -720,10 +801,10 @@ impl ControlFsm {
         if matches!(self.state, SessionState::Closing | SessionState::Closed) {
             Self::ignored_peer_request()
         } else {
-            Self::peer_response(
+            self.peer_response(
                 ControlDecision::empty(),
                 ControlMessage::LinktestResponse { system_bytes },
-                PeerResponseCommit::None,
+                PeerResponseCommitIntent::None,
             )
         }
     }
@@ -750,39 +831,53 @@ impl ControlFsm {
         &mut self,
         commit: PeerResponseCommit,
         next_t7: Option<TimerToken>,
-    ) -> Result<ControlDecision, ControlInvariantError> {
-        match commit {
-            PeerResponseCommit::None => {
-                Self::reject_unexpected_t7(next_t7, self.state)?;
-                Ok(ControlDecision::empty())
-            }
-            PeerResponseCommit::SelectAccepted => {
-                Self::reject_unexpected_t7(next_t7, self.state)?;
+    ) -> Result<CommittedPeerResponse, PeerResponseCommitFailure> {
+        if !self.peer_response_issuer.owns(&commit) {
+            return Err(PeerResponseCommitFailure::new(
+                ControlInvariantError::ForeignPeerResponseCommit,
+                commit,
+            ));
+        }
+
+        let decision = if commit.is_none() {
+            Self::reject_unexpected_t7(next_t7, self.state).map(|()| ControlDecision::empty())
+        } else if commit.is_select_accepted() {
+            let validation = Self::reject_unexpected_t7(next_t7, self.state);
+            validation.and_then(|()| {
                 if self.state == SessionState::NotSelected && !self.peer_deselect_pending {
                     self.upgrade()
                 } else {
                     Ok(ControlDecision::empty())
                 }
-            }
-            PeerResponseCommit::DeselectAccepted => {
-                if matches!(self.state, SessionState::Closing | SessionState::Closed) {
-                    Self::reject_unexpected_t7(next_t7, self.state)?;
-                    return Ok(ControlDecision::empty());
+            })
+        } else {
+            debug_assert!(commit.is_deselect_accepted());
+            if matches!(self.state, SessionState::Closing | SessionState::Closed) {
+                Self::reject_unexpected_t7(next_t7, self.state).map(|()| ControlDecision::empty())
+            } else if !self.peer_deselect_pending {
+                Err(ControlInvariantError::PeerDeselectCommitWithoutBarrier)
+            } else if self.state == SessionState::Selected {
+                match next_t7 {
+                    Some(token) => self.commit_peer_deselect(token),
+                    None => Err(ControlInvariantError::MissingT7ForDowngrade),
                 }
-                if !self.peer_deselect_pending {
-                    return Err(ControlInvariantError::PeerDeselectCommitWithoutBarrier);
-                }
-                if self.state == SessionState::Selected {
-                    let token = next_t7.ok_or(ControlInvariantError::MissingT7ForDowngrade)?;
-                    let decision = self.downgrade(token)?;
+            } else {
+                Self::reject_unexpected_t7(next_t7, self.state).map(|()| {
                     self.peer_deselect_pending = false;
-                    Ok(decision)
-                } else {
-                    Self::reject_unexpected_t7(next_t7, self.state)?;
-                    self.peer_deselect_pending = false;
-                    Ok(ControlDecision::empty())
-                }
+                    ControlDecision::empty()
+                })
             }
+        };
+
+        match decision {
+            Ok(decision) => {
+                let receipt = self
+                    .peer_response_issuer
+                    .commit(commit)
+                    .expect("peer-response brand was validated before mutation");
+                Ok(CommittedPeerResponse { decision, receipt })
+            }
+            Err(error) => Err(PeerResponseCommitFailure::new(error, commit)),
         }
     }
 
@@ -923,6 +1018,20 @@ impl ControlFsm {
         ]))
     }
 
+    /// Commits one accepted peer Deselect after a successful downgrade.
+    ///
+    /// `next_t7` starts the resulting NotSelected tenure. The pending peer
+    /// barrier is cleared only after [`Self::downgrade`] has completed all
+    /// validation and state mutation successfully.
+    fn commit_peer_deselect(
+        &mut self,
+        next_t7: TimerToken,
+    ) -> Result<ControlDecision, ControlInvariantError> {
+        let decision = self.downgrade(next_t7)?;
+        self.peer_deselect_pending = false;
+        Ok(decision)
+    }
+
     /// Validates that `token` represents an exact T7 registration.
     fn validate_t7(token: TimerToken) -> Result<(), ControlInvariantError> {
         if token.kind() == TimeoutKind::T7 {
@@ -947,18 +1056,26 @@ impl ControlFsm {
         }
     }
 
-    /// Builds a peer response decision from its typed split plan.
+    /// Builds a peer response decision with one exact typed write bundle.
     fn peer_response(
+        &self,
         immediate: ControlDecision,
         response: ControlMessage,
-        commit: PeerResponseCommit,
+        commit: PeerResponseCommitIntent,
     ) -> PeerRequestDecision {
+        let pending = match commit {
+            PeerResponseCommitIntent::None => self.peer_response_issuer.issue_none(response),
+            PeerResponseCommitIntent::SelectAccepted => {
+                self.peer_response_issuer.issue_select_accepted(response)
+            }
+            PeerResponseCommitIntent::DeselectAccepted => {
+                self.peer_response_issuer.issue_deselect_accepted(response)
+            }
+        }
+        .expect("ControlFsm response and deferred transition must agree");
+        debug_assert_eq!(pending.generation(), self.generation);
         PeerRequestDecision::Respond {
-            plan: PeerResponsePlan {
-                immediate,
-                response,
-                commit,
-            },
+            plan: PeerResponsePlan { immediate, pending },
         }
     }
 
@@ -980,7 +1097,7 @@ mod tests {
         PeerResponsePlan, SelectionOverlay,
     };
     use crate::hsms::{
-        contracts::{ControlIntent, DataGateState, PeerResponseCommit},
+        contracts::{peer_response::PeerResponseCommit, ControlIntent, DataGateState},
         core::transaction::ControlKind,
         model::{
             ids::{OperationId, SystemBytes, TimerId},
@@ -1011,8 +1128,14 @@ mod tests {
     }
 
     /// Starts one valid NotSelected FSM and discards its already-asserted actions.
+    /// Returns the fixed generation used by isolated ControlFsm tests.
+    fn generation() -> crate::hsms::model::ids::ConnectionGeneration {
+        crate::hsms::model::ids::ConnectionGeneration::new(7)
+    }
+
+    /// Starts a NotSelected ControlFsm in the fixed test generation.
     fn started() -> ControlFsm {
-        let (fsm, decision) = ControlFsm::start(t7(1)).expect("valid initial T7");
+        let (fsm, decision) = ControlFsm::start(generation(), t7(1)).expect("valid initial T7");
         assert_eq!(
             decision.actions(),
             [
@@ -1066,6 +1189,15 @@ mod tests {
         }
     }
 
+    /// Splits a peer plan through the test-only hook escape used by FSM tests.
+    ///
+    /// Production code cannot perform this split; CoreResources must first bind
+    /// the pending bundle to a write and reach its exact BeginWrite fence.
+    fn split_response_plan(plan: PeerResponsePlan) -> (ControlDecision, PeerResponseCommit) {
+        let (immediate, pending) = plan.into_ordered_parts();
+        (immediate, pending.into_commit_for_test())
+    }
+
     /// Extracts the action-only branch of a peer request or fails the test.
     fn no_response(decision: PeerRequestDecision) -> ControlDecision {
         match decision {
@@ -1080,14 +1212,15 @@ mod tests {
     #[test]
     fn start_requires_t7_and_emits_ordered_initial_actions() {
         assert_eq!(
-            ControlFsm::start(timer(1, TimeoutKind::T6)).expect_err("T6 is not an initial T7"),
+            ControlFsm::start(generation(), timer(1, TimeoutKind::T6))
+                .expect_err("T6 is not an initial T7"),
             ControlInvariantError::WrongTimerKind {
                 expected: TimeoutKind::T7,
                 actual: TimeoutKind::T6,
             }
         );
 
-        let (fsm, decision) = ControlFsm::start(t7(7)).expect("valid T7");
+        let (fsm, decision) = ControlFsm::start(generation(), t7(7)).expect("valid T7");
         assert_eq!(fsm.state(), SessionState::NotSelected);
         assert_eq!(fsm.overlay(), SelectionOverlay::Idle);
         assert!(!fsm.peer_deselect_pending());
@@ -1492,39 +1625,39 @@ mod tests {
         let plan = response_plan(fsm.on_select_request(7, system_bytes(60)));
         assert_eq!(
             plan.response(),
-            &ControlMessage::SelectResponse {
+            ControlMessage::SelectResponse {
                 session_id: 7,
                 status: SelectStatus::SUCCESS,
                 system_bytes: system_bytes(60),
             }
         );
-        assert_eq!(plan.commit(), PeerResponseCommit::SelectAccepted);
+        assert!(plan.pending().is_select_accepted());
         assert!(plan.immediate_decision().is_empty());
 
         let fsm = selected();
         let plan = response_plan(fsm.on_select_request(8, system_bytes(61)));
         assert_eq!(
             plan.response(),
-            &ControlMessage::SelectResponse {
+            ControlMessage::SelectResponse {
                 session_id: 8,
                 status: SelectStatus::ALREADY_ACTIVE,
                 system_bytes: system_bytes(61),
             }
         );
-        assert_eq!(plan.commit(), PeerResponseCommit::None);
+        assert!(plan.pending().is_none());
 
         let mut fsm = selected();
         let _ = fsm.on_deselect_request(9, system_bytes(62));
         let plan = response_plan(fsm.on_select_request(9, system_bytes(63)));
         assert_eq!(
             plan.response(),
-            &ControlMessage::SelectResponse {
+            ControlMessage::SelectResponse {
                 session_id: 9,
                 status: SelectStatus::NOT_READY,
                 system_bytes: system_bytes(63),
             }
         );
-        assert_eq!(plan.commit(), PeerResponseCommit::None);
+        assert!(plan.pending().is_none());
     }
 
     /// Confirms accepted peer Select upgrades only when its response begins writing.
@@ -1534,12 +1667,15 @@ mod tests {
         let plan = response_plan(fsm.on_select_request(10, system_bytes(64)));
         assert_eq!(fsm.state(), SessionState::NotSelected);
 
-        let (immediate, response, commit) = plan.into_ordered_parts();
+        let response = plan.response();
+        let (immediate, commit) = split_response_plan(plan);
         assert!(immediate.is_empty());
         assert!(matches!(response, ControlMessage::SelectResponse { .. }));
-        let decision = fsm
+        let committed = fsm
             .commit_peer_response(commit, None)
             .expect("accepted peer Select fence");
+        let (decision, receipt) = committed.into_parts();
+        assert!(receipt.is_select_accepted());
         assert_eq!(
             decision.actions(),
             [
@@ -1558,10 +1694,13 @@ mod tests {
         let id = operation(65);
         start_transaction(&mut fsm, ControlIntent::Select, id);
         let plan = response_plan(fsm.on_select_request(11, system_bytes(65)));
+        let (_, commit) = split_response_plan(plan);
 
-        let peer = fsm
-            .commit_peer_response(plan.commit(), None)
+        let committed = fsm
+            .commit_peer_response(commit, None)
             .expect("peer Select response fence");
+        let (peer, receipt) = committed.into_parts();
+        assert!(receipt.is_select_accepted());
         assert!(!peer.is_empty());
         assert_eq!(fsm.state(), SessionState::Selected);
         assert_eq!(
@@ -1591,13 +1730,13 @@ mod tests {
         let plan = response_plan(fsm.on_deselect_request(12, system_bytes(70)));
         assert_eq!(
             plan.response(),
-            &ControlMessage::DeselectResponse {
+            ControlMessage::DeselectResponse {
                 session_id: 12,
                 status: DeselectStatus::SUCCESS,
                 system_bytes: system_bytes(70),
             }
         );
-        assert_eq!(plan.commit(), PeerResponseCommit::DeselectAccepted);
+        assert!(plan.pending().is_deselect_accepted());
         assert_eq!(
             plan.immediate_decision().actions(),
             [ControlAction::SetDataGate(DataGateState::Closed)]
@@ -1609,13 +1748,13 @@ mod tests {
         let duplicate = response_plan(fsm.on_deselect_request(12, system_bytes(71)));
         assert_eq!(
             duplicate.response(),
-            &ControlMessage::DeselectResponse {
+            ControlMessage::DeselectResponse {
                 session_id: 12,
                 status: DeselectStatus::BUSY,
                 system_bytes: system_bytes(71),
             }
         );
-        assert_eq!(duplicate.commit(), PeerResponseCommit::None);
+        assert!(duplicate.pending().is_none());
         assert!(duplicate.immediate_decision().is_empty());
     }
 
@@ -1626,13 +1765,13 @@ mod tests {
         let plan = response_plan(fsm.on_deselect_request(13, system_bytes(72)));
         assert_eq!(
             plan.response(),
-            &ControlMessage::DeselectResponse {
+            ControlMessage::DeselectResponse {
                 session_id: 13,
                 status: DeselectStatus::NOT_SELECTED,
                 system_bytes: system_bytes(72),
             }
         );
-        assert_eq!(plan.commit(), PeerResponseCommit::None);
+        assert!(plan.pending().is_none());
         assert!(plan.immediate_decision().is_empty());
         assert!(!fsm.peer_deselect_pending());
         assert_eq!(fsm.t7(), Some(t7(1)));
@@ -1643,10 +1782,13 @@ mod tests {
     fn peer_deselect_response_fence_commits_one_downgrade() {
         let mut fsm = selected();
         let plan = response_plan(fsm.on_deselect_request(14, system_bytes(73)));
+        let (_, commit) = split_response_plan(plan);
 
-        let decision = fsm
-            .commit_peer_response(plan.commit(), Some(t7(4)))
+        let committed = fsm
+            .commit_peer_response(commit, Some(t7(4)))
             .expect("accepted peer Deselect fence");
+        let (decision, receipt) = committed.into_parts();
+        assert!(receipt.is_deselect_accepted());
         assert_eq!(
             decision.actions(),
             [
@@ -1665,25 +1807,38 @@ mod tests {
     /// Confirms peer Deselect fence validation leaves its gate barrier intact.
     #[test]
     fn peer_deselect_fence_t7_errors_do_not_partially_clear_the_barrier() {
-        let mut fsm = selected();
-        let plan = response_plan(fsm.on_deselect_request(15, system_bytes(74)));
-
+        let mut missing_t7 = selected();
+        let plan = response_plan(missing_t7.on_deselect_request(15, system_bytes(74)));
+        let (_, commit) = split_response_plan(plan);
+        let failure = missing_t7
+            .commit_peer_response(commit, None)
+            .expect_err("accepted Deselect requires a replacement T7");
         assert_eq!(
-            fsm.commit_peer_response(plan.commit(), None),
-            Err(ControlInvariantError::MissingT7ForDowngrade)
+            failure.error(),
+            ControlInvariantError::MissingT7ForDowngrade
         );
-        assert_eq!(fsm.state(), SessionState::Selected);
-        assert!(fsm.peer_deselect_pending());
+        let (_, returned_commit) = failure.into_parts();
+        assert!(returned_commit.is_deselect_accepted());
+        assert_eq!(missing_t7.state(), SessionState::Selected);
+        assert!(missing_t7.peer_deselect_pending());
 
+        let mut wrong_kind = selected();
+        let plan = response_plan(wrong_kind.on_deselect_request(15, system_bytes(74)));
+        let (_, commit) = split_response_plan(plan);
+        let failure = wrong_kind
+            .commit_peer_response(commit, Some(timer(5, TimeoutKind::Linktest)))
+            .expect_err("accepted Deselect requires a T7 timer");
         assert_eq!(
-            fsm.commit_peer_response(plan.commit(), Some(timer(5, TimeoutKind::Linktest)),),
-            Err(ControlInvariantError::WrongTimerKind {
+            failure.error(),
+            ControlInvariantError::WrongTimerKind {
                 expected: TimeoutKind::T7,
                 actual: TimeoutKind::Linktest,
-            })
+            }
         );
-        assert_eq!(fsm.state(), SessionState::Selected);
-        assert!(fsm.peer_deselect_pending());
+        let (_, returned_commit) = failure.into_parts();
+        assert!(returned_commit.is_deselect_accepted());
+        assert_eq!(wrong_kind.state(), SessionState::Selected);
+        assert!(wrong_kind.peer_deselect_pending());
     }
 
     /// Confirms peer-first simultaneous Deselect leaves the local result transition-free.
@@ -1693,11 +1848,14 @@ mod tests {
         let id = operation(75);
         start_transaction(&mut fsm, ControlIntent::Deselect, id);
         let peer = response_plan(fsm.on_deselect_request(16, system_bytes(75)));
+        let (_, commit) = split_response_plan(peer);
 
-        assert!(!fsm
-            .commit_peer_response(peer.commit(), Some(t7(6)))
-            .expect("peer Deselect fence")
-            .is_empty());
+        let committed = fsm
+            .commit_peer_response(commit, Some(t7(6)))
+            .expect("peer Deselect fence");
+        let (decision, receipt) = committed.into_parts();
+        assert!(receipt.is_deselect_accepted());
+        assert!(!decision.is_empty());
         assert_eq!(
             fsm.overlay(),
             SelectionOverlay::Deselecting { operation_id: id }
@@ -1725,6 +1883,7 @@ mod tests {
         let id = operation(76);
         start_transaction(&mut fsm, ControlIntent::Deselect, id);
         let peer = response_plan(fsm.on_deselect_request(17, system_bytes(76)));
+        let (_, commit) = split_response_plan(peer);
 
         let local = fsm
             .on_matched_response(
@@ -1738,10 +1897,12 @@ mod tests {
         assert!(!local.state_decision().is_empty());
         assert!(fsm.peer_deselect_pending());
 
-        let peer_commit = fsm
-            .commit_peer_response(peer.commit(), None)
+        let committed = fsm
+            .commit_peer_response(commit, None)
             .expect("peer Deselect response fence");
-        assert!(peer_commit.is_empty());
+        let (peer_decision, receipt) = committed.into_parts();
+        assert!(receipt.is_deselect_accepted());
+        assert!(peer_decision.is_empty());
         assert_eq!(fsm.state(), SessionState::NotSelected);
         assert_eq!(fsm.t7(), Some(t7(7)));
         assert!(!fsm.peer_deselect_pending());
@@ -1754,11 +1915,11 @@ mod tests {
         let plan = response_plan(fsm.on_linktest_request(system_bytes(80)));
         assert_eq!(
             plan.response(),
-            &ControlMessage::LinktestResponse {
+            ControlMessage::LinktestResponse {
                 system_bytes: system_bytes(80),
             }
         );
-        assert_eq!(plan.commit(), PeerResponseCommit::None);
+        assert!(plan.pending().is_none());
 
         let mut fsm = selected();
         let _ = fsm.begin_close(
@@ -1947,7 +2108,9 @@ mod tests {
     /// Confirms Closing rejects new local work and ignores every peer request.
     #[test]
     fn closing_state_is_an_inert_control_boundary() {
-        let mut fsm = selected();
+        let mut fsm = started();
+        let stale = response_plan(fsm.on_select_request(18, system_bytes(129)));
+        let (_, commit) = split_response_plan(stale);
         let _ = fsm.begin_close(
             GenerationCloseReason::LocalDisconnect,
             CloseBarrier::Immediate,
@@ -1960,10 +2123,12 @@ mod tests {
         assert!(no_response(fsm.on_select_request(18, system_bytes(130))).is_empty());
         assert!(no_response(fsm.on_deselect_request(18, system_bytes(131))).is_empty());
         assert!(no_response(fsm.on_separate_request()).is_empty());
-        assert!(fsm
-            .commit_peer_response(PeerResponseCommit::SelectAccepted, None)
-            .expect("stale Select fence is inert")
-            .is_empty());
+        let committed = fsm
+            .commit_peer_response(commit, None)
+            .expect("stale Select fence is inert");
+        let (decision, receipt) = committed.into_parts();
+        assert!(receipt.is_select_accepted());
+        assert!(decision.is_empty());
         assert_eq!(fsm.state(), SessionState::Closing);
     }
 
@@ -1971,12 +2136,19 @@ mod tests {
     #[test]
     fn response_commits_reject_t7_when_no_new_tenure_begins() {
         let mut fsm = started();
+        let plan = response_plan(fsm.on_linktest_request(system_bytes(109)));
+        let (_, commit) = split_response_plan(plan);
+        let failure = fsm
+            .commit_peer_response(commit, Some(t7(110)))
+            .expect_err("non-transition response cannot allocate T7");
         assert_eq!(
-            fsm.commit_peer_response(PeerResponseCommit::None, Some(t7(110))),
-            Err(ControlInvariantError::UnexpectedT7ForState {
+            failure.error(),
+            ControlInvariantError::UnexpectedT7ForState {
                 state: SessionState::NotSelected,
-            })
+            }
         );
+        let (_, returned_commit) = failure.into_parts();
+        assert!(returned_commit.is_none());
         assert_eq!(fsm.state(), SessionState::NotSelected);
         assert_eq!(fsm.t7(), Some(t7(1)));
 
@@ -1996,12 +2168,21 @@ mod tests {
     /// Confirms a peer Deselect fence cannot be fabricated without its barrier.
     #[test]
     fn peer_deselect_commit_requires_an_accepted_request_barrier() {
-        let mut fsm = selected();
+        let mut target = selected();
+        let mut foreign = selected();
+        let plan = response_plan(foreign.on_deselect_request(19, system_bytes(132)));
+        let (_, commit) = split_response_plan(plan);
+        let failure = target
+            .commit_peer_response(commit, Some(t7(120)))
+            .expect_err("another issuer brand cannot commit this barrier");
         assert_eq!(
-            fsm.commit_peer_response(PeerResponseCommit::DeselectAccepted, Some(t7(120)),),
-            Err(ControlInvariantError::PeerDeselectCommitWithoutBarrier)
+            failure.error(),
+            ControlInvariantError::ForeignPeerResponseCommit
         );
-        assert_eq!(fsm.state(), SessionState::Selected);
-        assert_eq!(fsm.t7(), None);
+        let (_, returned_commit) = failure.into_parts();
+        assert!(returned_commit.is_deselect_accepted());
+        assert_eq!(target.state(), SessionState::Selected);
+        assert_eq!(target.t7(), None);
+        assert!(!target.peer_deselect_pending());
     }
 }

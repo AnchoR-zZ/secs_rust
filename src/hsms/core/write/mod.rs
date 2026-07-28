@@ -1,13 +1,6 @@
-//! Pure contracts and lifecycle state for generation-local outbound writes.
+//! Private implementation boundary for the generation-local WriteLedger.
 //!
-//! The contract is frozen independently of the later bounded `WriteLedger`
-//! implementation so Core and runtime coordination share one fence vocabulary.
+//! Cross-layer write plans and receipts live in `hsms::contracts`; this
+//! module owns only ledger state and mutation logic.
 
-mod contract;
 mod ledger;
-
-/// Frozen write contracts re-exported for later ledger and reducer tasks.
-#[allow(unused_imports)]
-pub(crate) use contract::{
-    BeginWriteHook, FenceResolution, WritePhase, WriteSpec, WriteTerminalOutcome,
-};

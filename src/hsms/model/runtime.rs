@@ -68,6 +68,52 @@ pub(crate) enum WriteResult {
     Indeterminate(TransportFault),
 }
 
+/// Conservative write classification used by Core after validating runtime evidence.
+///
+/// This is deliberately distinct from [`WriteResult`]: Core may strengthen a
+/// contradictory runtime `NotWritten` result to `Indeterminate` when earlier
+/// evidence established that bytes may already be visible.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EffectiveWriteResult {
+    /// The complete frame reached the local ordered writer commit point.
+    Committed,
+    /// Core can still establish that no frame byte became visible.
+    NotWritten(TransportFault),
+    /// Peer delivery cannot be determined conservatively.
+    Indeterminate(TransportFault),
+}
+
+/// Runtime-contract contradiction retained with a conservative terminal result.
+///
+/// A violation never replaces terminal accounting. Core records the effective
+/// result and this diagnostic together so an impossible callback cannot be
+/// silently treated as an ordinary completion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WriteRuntimeViolation {
+    /// A terminal callback arrived before scheduling acknowledgement completed.
+    TerminalWhileScheduling,
+    /// A terminal callback arrived before the runtime raised the BeginWrite fence.
+    TerminalWhileQueued,
+    /// A terminal callback bypassed an unresolved BeginWrite fence.
+    TerminalWithUnresolvedFence,
+    /// Runtime claimed nothing was written after reporting possible visibility.
+    NotWrittenAfterMayBeVisible,
+    /// An aborting write nevertheless reached the writer commit point.
+    AbortingCommitted,
+    /// An aborting write ended indeterminately instead of confirming cancellation.
+    AbortingIndeterminate,
+    /// An aborting write returned `NotWritten` for a non-cancellation fault.
+    AbortingNotCancelled {
+        /// Actual transport-fault classification returned by the runtime.
+        actual: TransportFaultKind,
+    },
+    /// An aborting write contradicted prior visibility with `NotWritten`.
+    AbortingNotWrittenAfterMayBeVisible {
+        /// Actual transport-fault classification returned by the runtime.
+        actual: TransportFaultKind,
+    },
+}
+
 /// Communications timeout that makes an open generation unusable.
 ///
 /// This close classification deliberately excludes application-operation

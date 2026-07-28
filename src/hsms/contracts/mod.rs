@@ -13,6 +13,7 @@ mod core_input;
 mod endpoint_event;
 mod message;
 mod orchestration;
+pub(crate) mod peer_response;
 mod write;
 
 pub use command::ControlIntent;
@@ -34,7 +35,7 @@ pub(crate) use completion::{
     CommandCompletionAuthority, CoreCommandCompletion, CoreCompletionValue,
 };
 #[allow(unused_imports)]
-pub(crate) use core_effect::CoreEffect;
+pub(crate) use core_effect::{CoreEffect, CoreEffectBatch, CoreEffectBatchRejection};
 #[allow(unused_imports)]
 pub(crate) use core_input::{ApplicationDeliveryResult, CoreEvent, CoreInput, ShutdownKind};
 #[cfg(test)]
@@ -46,4 +47,14 @@ pub(crate) use orchestration::{
     RejectSelector,
 };
 #[allow(unused_imports)]
-pub(crate) use write::{DataGateState, PeerResponseCommit, ScheduleFailure, WriteClass};
+pub(crate) use write::{
+    AbandonedPeerResponse, AbortWriteReceipt, AbortingAuthority, BeginWriteFailure,
+    BeginWriteFence, BeginWriteObservation, CommittedPeerHookAbort, CommittedPeerResponseFence,
+    DataGateState, ForeignPeerResponseResolution, InvalidWriteAuthority, MustCloseGeneration,
+    NoHookFence, PeerHookAbort, PeerHookAbortError, PeerHookAbortRejection, PeerResponseFence,
+    PeerResponseFenceContinuation, PeerResponseResolutionAbort, PeerResponseResolutionError,
+    PreparedWrite, ProceedWriteReceipt, ProceededAuthority, QueuedAuthority, ScheduleFailure,
+    SchedulingAuthority, TerminalWriteTransition, WriteBindError, WriteBindFailure, WriteClass,
+    WritePhase, WriteReceiptIssuer, WriteRegistration, WriteSpec, WriteSpecError, WriteSpecFailure,
+    WriteTerminalOutcome, WriteTerminalReceipt,
+};
