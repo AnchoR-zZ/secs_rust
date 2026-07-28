@@ -3,10 +3,22 @@
 //! The assembled reducer will expose only atomic orchestration methods here;
 //! callers will not receive independent mutable access to the contained ledgers.
 
-pub(crate) mod authority;
+pub(super) mod authority;
 mod ids;
+mod publication;
 
 use self::authority::PeerRejectMutationAuthority;
+
+#[allow(unused_imports)]
+pub(super) use publication::{
+    NormalSecondaryUnavailable, PreparedReplyUse, PublicationAdmissionError, PublicationCloseError,
+    PublicationCloseSummary, PublicationDeliveryTerminal, PublicationDisposition,
+    PublicationFinishError, PublicationInvariantViolation, PublicationReplyUseCommitFailure,
+    PublicationReplyUsePrepareFailure, PublicationResetError, PublicationResetSummary,
+    PublicationResourceKind, PublicationResources, PublicationResourcesBuildError,
+    ReplyCapabilityMode, ReplyContract, ReplyContractError, ReplyUseCommitError, ReplyUseKind,
+    ReplyUseTerminal, ReplyUseUnavailable,
+};
 
 use crate::hsms::{
     contracts::{PeerRejectDisposition, RejectReference},

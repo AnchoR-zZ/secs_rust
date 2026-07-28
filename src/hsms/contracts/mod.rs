@@ -25,7 +25,7 @@ pub use message::{
     DataEventToken, InboundPrimary, InboundToken, PrimaryMessage, ReplyToken, SecondaryMessage,
 };
 #[allow(unused_imports)]
-pub(crate) use message::{ReplyTokenClaim, ReplyTokenIssuer, ValidatedReplyTokenClaim};
+pub(crate) use message::{ReplyTokenIssuer, ReplyTokenRouteError, ValidatedReplyTokenRoute};
 
 #[allow(unused_imports)]
 pub(crate) use command::CoreCommand;

@@ -172,53 +172,61 @@ impl ReplyTokenIssuer {
         )
     }
 
-    /// Opens a consumed claim only when it carries this exact issuer brand.
+    /// Validates the token's generation route and exact issuer without consuming it.
     ///
-    /// A foreign claim is returned intact so validation itself does not expose
-    /// or copy its private numeric identity.
-    pub(crate) fn validate_claim(
+    /// Generation is checked before issuer identity so an obsolete token from a
+    /// previous connection can be classified as stale even though each
+    /// generation owns a fresh issuer. Success returns a crate-private numeric
+    /// observation used only for exact live-entry validation.
+    pub(crate) fn validate_route(
         &self,
-        claim: ReplyTokenClaim,
-    ) -> Result<ValidatedReplyTokenClaim, ReplyTokenClaim> {
-        if !Arc::ptr_eq(&self.brand, &claim.brand) {
-            return Err(claim);
+        token: &ReplyToken,
+        expected_generation: ConnectionGeneration,
+    ) -> Result<ValidatedReplyTokenRoute, ReplyTokenRouteError> {
+        if token.generation != expected_generation {
+            return Err(ReplyTokenRouteError::WrongGeneration {
+                expected: expected_generation,
+                actual: token.generation,
+            });
         }
-        Ok(ValidatedReplyTokenClaim {
-            capability_id: claim.capability_id,
-            generation: claim.generation,
-            incarnation: claim.incarnation,
+        if !Arc::ptr_eq(&self.brand, &token.brand) {
+            return Err(ReplyTokenRouteError::ForeignIssuer);
+        }
+        Ok(ValidatedReplyTokenRoute {
+            capability_id: token.capability_id,
+            generation: token.generation,
+            incarnation: token.incarnation,
         })
     }
 }
 
-/// Move-only token identity after the public application token is consumed.
-///
-/// Fields remain opaque until the owning issuer validates the private brand.
-#[must_use = "a consumed reply token claim must be validated by its owning ledger"]
-pub(crate) struct ReplyTokenClaim {
-    /// Ledger-instance brand moved out of the application token.
-    brand: Arc<ReplyTokenBrand>,
-    /// Opaque capability ID moved out of the application token.
+/// Failure routing a borrowed reply token to one generation-scoped issuer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplyTokenRouteError {
+    /// The token belongs to an obsolete or otherwise different connection generation.
+    WrongGeneration {
+        /// Generation expected by the receiving publication aggregate.
+        expected: ConnectionGeneration,
+        /// Generation carried by the borrowed application token.
+        actual: ConnectionGeneration,
+    },
+    /// The token was minted by another reply-ledger instance in this generation.
+    ForeignIssuer,
+}
+
+/// Numeric token identity released only after borrowed route validation succeeds.
+#[must_use = "validated token identity must be matched against the live reply entry"]
+pub(crate) struct ValidatedReplyTokenRoute {
+    /// Opaque capability ID proven to carry the owning ledger's issuer brand.
     capability_id: ReplyCapabilityId,
-    /// TCP generation moved out of the application token.
+    /// TCP generation proven equal to the receiving aggregate's generation.
     generation: ConnectionGeneration,
-    /// Exact reservation incarnation moved out of the application token.
+    /// Exact reservation incarnation observed without consuming the token.
     incarnation: ReplyCapabilityIncarnation,
 }
 
-/// Numeric identity released only after issuer-brand validation succeeds.
-#[must_use = "validated token identity must be matched against the live ledger entry"]
-pub(crate) struct ValidatedReplyTokenClaim {
-    /// Opaque capability ID proven to carry the owning ledger's brand.
-    capability_id: ReplyCapabilityId,
-    /// TCP generation proven to carry the owning ledger's brand.
-    generation: ConnectionGeneration,
-    /// Reservation incarnation proven to carry the owning ledger's brand.
-    incarnation: ReplyCapabilityIncarnation,
-}
-
-impl ValidatedReplyTokenClaim {
-    /// Consumes the validated claim and returns its exact ledger lookup identity.
+impl ValidatedReplyTokenRoute {
+    /// Consumes the observation and returns its exact ledger lookup identity.
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -261,16 +269,6 @@ impl ReplyToken {
             ReplyCapabilityIncarnation::new(1),
             normal_secondary_available,
         )
-    }
-
-    /// Consumes this move-only token into a claim for issuer-brand validation.
-    pub(crate) fn into_claim(self) -> ReplyTokenClaim {
-        ReplyTokenClaim {
-            brand: self.brand,
-            capability_id: self.capability_id,
-            generation: self.generation,
-            incarnation: self.incarnation,
-        }
     }
 
     /// Returns the private pre-Core admission hint for a normal Secondary.
@@ -399,16 +397,17 @@ mod tests {
         assert!(!debug.contains("123456"));
     }
 
-    /// Guards the production token API against reintroducing a crate-visible
-    /// raw constructor or borrowed numeric-identity accessors.
+    /// Guards the production token API against consuming validation or
+    /// reintroducing raw numeric-identity accessors.
     #[test]
-    fn reply_token_production_surface_requires_move_only_claim_validation() {
+    fn reply_token_production_surface_uses_borrowed_route_validation() {
         let source = include_str!("message.rs");
         let forbidden_surfaces = [
             concat!("pub(crate) fn ", "from_issuer"),
             concat!("pub(crate) const fn ", "capability_id(&self)"),
             concat!("pub(crate) const fn ", "generation(&self)"),
             concat!("pub(crate) const fn ", "incarnation(&self)"),
+            concat!("pub(crate) fn ", "into_claim(self)"),
         ];
 
         for forbidden in forbidden_surfaces {
@@ -417,7 +416,7 @@ mod tests {
                 "production ReplyToken surface exposed forbidden API: {forbidden}"
             );
         }
-        assert!(source.contains("pub(crate) fn into_claim(self)"));
+        assert!(source.contains("pub(crate) fn validate_route("));
         assert!(source.contains("Arc::ptr_eq"));
     }
 }

@@ -1,7 +1,7 @@
-//! Sealed mutation authority shared by the HSMS resource aggregate and its ledgers.
+//! Sealed mutation authority shared only by non-publication Core resources.
 //!
-//! The resource coordinator is the sole production issuer. Operation and transaction
-//! ledgers may name and consume the gate, but cannot construct it.
+//! Publication authority lives under the private `publication` subtree so
+//! other `CoreResources` children cannot construct or coordinate its ledgers.
 
 /// Sealed authority allowing the transaction ledger to apply a validated peer Reject.
 #[derive(Debug)]
