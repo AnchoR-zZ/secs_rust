@@ -13,8 +13,6 @@ use crate::{
 
 /// Minimum E37 Message Length: the mandatory ten-byte HSMS header.
 const HSMS_HEADER_LENGTH: usize = 10;
-/// One generation permits at most one transactional control operation.
-const CONTROL_OPERATION_CAPACITY: usize = 1;
 
 /// Whether this endpoint initiates or accepts the TCP connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,12 +171,11 @@ pub struct EndpointLimits {
     /// Bounded outbound capacity for Data frames.
     data_lane_capacity: usize,
     /// Maximum number of reliable events buffered for the application.
-    // Core receives the same application-delivery correlation capacity.
     application_event_capacity: usize,
     /// Maximum number of simultaneously pending request/response transactions.
     transaction_capacity: usize,
-    /// Independent history bound for transaction tombstones and outbound
-    /// Reject-correlation terminal records.
+    /// Maximum retained terminal transaction identities used for late-message
+    /// and peer-Reject classification.
     tombstone_capacity: usize,
     /// Maximum number of live single-use inbound reply capabilities.
     reply_capability_capacity: usize,
@@ -251,14 +248,6 @@ impl EndpointLimits {
             }
         }
 
-        self.transaction_capacity
-            .checked_add(CONTROL_OPERATION_CAPACITY)
-            .and_then(|capacity| capacity.checked_add(self.data_lane_capacity))
-            .and_then(|capacity| capacity.checked_add(self.critical_lane_capacity))
-            .ok_or(ConfigError::DerivedCapacityOverflow {
-                field: "operation_capacity",
-            })?;
-
         Ok(())
     }
 
@@ -302,11 +291,7 @@ impl EndpointLimits {
     }
 
     #[must_use]
-    /// Returns the independent history bound used by transaction tombstones
-    /// and outbound Reject-correlation terminal records.
-    ///
-    /// Each registry receives this full capacity; the two histories do not
-    /// compete for shared slots.
+    /// Returns the bounded terminal transaction history capacity.
     pub const fn tombstone_capacity(self) -> usize {
         self.tombstone_capacity
     }
@@ -453,17 +438,11 @@ impl EndpointConfig {
 #[cfg(test)]
 mod tests {
     use super::EndpointLimits;
-    use crate::hsms::ConfigError;
 
-    /// Confirms endpoint validation rejects arithmetic overflow in the
-    /// aggregate `OperationLedger` capacity before generation assembly.
+    /// Confirms independent capacities do not produce an obsolete aggregate
+    /// internal-state bound.
     #[test]
-    fn endpoint_limits_reject_derived_operation_capacity_overflow() {
-        assert_eq!(
-            EndpointLimits::new(10, 1, 1, 1, 1, usize::MAX, 1, 1),
-            Err(ConfigError::DerivedCapacityOverflow {
-                field: "operation_capacity",
-            })
-        );
+    fn endpoint_limits_do_not_derive_operation_capacity() {
+        assert!(EndpointLimits::new(10, 1, 1, 1, 1, usize::MAX, 1, 1).is_ok());
     }
 }

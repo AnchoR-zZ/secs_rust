@@ -2,7 +2,7 @@
 //!
 //! These values return the original single-use token and optional Secondary
 //! body when bounded admission or generation validation fails. They never
-//! represent failures after a command has entered `HsmsCore`.
+//! represent failures after a command has entered the protocol core.
 
 #![allow(dead_code)]
 
@@ -64,7 +64,7 @@ pub enum ReplyAdmissionReason {
     ReplyRequiresAbort,
 }
 
-/// A reply operation rejected before ownership reached `HsmsCore`.
+/// A reply operation rejected before ownership reached the protocol core.
 ///
 /// The caller receives every moved input back and may retry, abort, abandon,
 /// or otherwise dispose of the token. Once a typed command enters Core, its
@@ -194,7 +194,7 @@ mod tests {
 
     /// Creates a deterministic single-use token for admission tests.
     fn token(normal_secondary_available: bool) -> ReplyToken {
-        ReplyToken::new(
+        ReplyToken::for_test(
             ReplyCapabilityId::new(17),
             ConnectionGeneration::new(3),
             normal_secondary_available,

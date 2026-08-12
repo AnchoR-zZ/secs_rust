@@ -1,11 +1,8 @@
 //! HSMS-SS public values and internal component boundaries.
 
-mod admission;
 pub mod api;
 mod codec;
 pub mod config;
-mod contracts;
-mod core;
 pub mod error;
 mod generation;
 pub mod lifecycle;

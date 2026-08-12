@@ -1,16 +1,22 @@
-//! Public application facade for neutral HSMS boundary contracts.
+//! Public application-owned HSMS values and endpoint event contracts.
 //!
-//! `HsmsHandle` and `HsmsRuntime` are implemented in Wave 2A after admission
-//! and lifecycle semantics are available.
+//! Runtime-internal Core and writer protocols deliberately do not live here.
+//! The eventual endpoint handle will consume these values without exposing
+//! protocol headers, System Bytes, or internal resource ownership.
 
+mod command;
+mod completion;
+mod event;
+mod message;
 mod reply;
 
-pub use crate::hsms::contracts::{
+pub use command::ControlIntent;
+pub use completion::SendReceipt;
+pub use event::{
     ConnectionCloseReason, EndpointEvent, EndpointEventEnvelope, PeerRejectDisposition,
-    PeerRejectNotice, ProtocolNotice, SendReceipt,
+    PeerRejectNotice, ProtocolNotice,
 };
-pub use crate::hsms::contracts::{
-    ControlIntent, DataEventToken, InboundPrimary, InboundToken, PrimaryMessage, ReplyToken,
-    SecondaryMessage,
+pub use message::{
+    DataEventToken, InboundPrimary, InboundToken, PrimaryMessage, ReplyToken, SecondaryMessage,
 };
 pub use reply::{ReplyAdmissionError, ReplyAdmissionReason, ReplyIntent};

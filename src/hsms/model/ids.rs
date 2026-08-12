@@ -136,43 +136,13 @@ macro_rules! internal_id {
 }
 
 internal_id!(
-    CommandId,
-    "Identifies one application command and its completion."
-);
-internal_id!(
-    OperationId,
-    "Identifies one application-requested or autonomous Core operation. \
-     `HsmsCore` allocates it once per accepted operation; applications cannot \
-     supply it and the value is never reused within a connection generation."
-);
-internal_id!(
-    WriteId,
-    "Identifies one outbound frame independently of its owning operation. \
-     `HsmsCore` allocates it before requesting scheduling and never reuses it \
-     within a connection generation."
-);
-internal_id!(
-    DeliveryId,
-    "Identifies one reliable application delivery attempt and its completion."
-);
-internal_id!(
     ReplyCapabilityId,
     "Identifies one single-use authority to reply to an inbound primary."
 );
 internal_id!(
-    ReplyCapabilityIncarnation,
-    "Identifies the exact ledger reservation behind one opaque reply token. \
-     The value is crate-private, never appears in public diagnostics, never \
-     wraps, and is never reused during a reply ledger's lifetime."
-);
-internal_id!(
-    TimerId,
-    "Identifies one timer registration independently of its timeout kind."
-);
-internal_id!(
     WireSequence,
     "Identifies one frame position in generation-local wire order. \
-     `WireScheduler` assigns it only after accepting a scheduling request and \
+     `WriterAdapter` assigns it only after accepting a frame and \
      never reuses it within the connection generation."
 );
 internal_id!(
@@ -188,7 +158,7 @@ internal_id!(
 /// from the application API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct SystemBytes(
-    /// Four-byte transaction correlation value allocated by the Core registry.
+    /// Four-byte transaction correlation value allocated by the protocol core.
     u32,
 );
 

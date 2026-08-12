@@ -44,13 +44,6 @@ pub enum ConfigError {
         field: &'static str,
     },
 
-    /// Checked arithmetic overflowed while deriving a composite capacity.
-    #[error("configured capacities overflow while deriving `{field}`")]
-    DerivedCapacityOverflow {
-        /// Name of the derived capacity that could not be represented.
-        field: &'static str,
-    },
-
     /// The configured Message Length cannot contain the mandatory HSMS header.
     #[error("maximum HSMS message length {value} is smaller than the 10-byte header")]
     MessageLengthTooSmall {

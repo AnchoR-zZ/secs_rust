@@ -1,9 +1,9 @@
-//! Defines reliable application events and their monotonic endpoint envelope.
+//! Public endpoint events and their monotonically ordered envelope.
 //!
-//! The endpoint publishes state, inbound Data, close, and diagnostic events
-//! through the non-blocking application event port without exposing internal
-//! actor or channel representations.
+//! Events expose stable application semantics while keeping raw correlation
+//! headers and runtime implementation details inside the endpoint.
 
+// Internal constructors become production-reachable with SessionDriver/EventPort.
 #![allow(dead_code)]
 
 use crate::hsms::{
@@ -13,9 +13,9 @@ use crate::hsms::{
     protocol::header::RejectReason,
 };
 
-use super::message::InboundPrimary;
+use super::InboundPrimary;
 
-/// Public reason for an open generation ending.
+/// Public reason for an open connection generation ending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionCloseReason {
     /// The application stopped the logical endpoint.
@@ -30,14 +30,11 @@ pub enum ConnectionCloseReason {
     TransportLost,
     /// Continuing the connection would violate HSMS protocol invariants.
     ProtocolViolation,
-    /// Reliable inbound delivery could not accept another event.
-    /// This includes a full or closed application port, exhausted reply-
-    /// capability capacity, or failure to reserve all resources required for
-    /// reliable inbound publication.
+    /// Reliable inbound event delivery could not accept more work.
     ApplicationBackpressure,
 }
 
-/// How Core classified one peer `Reject.req` without exposing raw headers.
+/// How the Core classified one peer `Reject.req`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PeerRejectDisposition {
@@ -49,9 +46,9 @@ pub enum PeerRejectDisposition {
     Unknown,
     /// More than one candidate matched, so no operation was changed.
     Ambiguous,
-    /// The reference matched work that had already reached another terminal result.
+    /// The reference matched work already completed by another outcome.
     Late,
-    /// The exact same rejection had already been processed.
+    /// The same rejection had already been processed.
     Duplicate,
     /// A retained operation had already received a different rejection.
     Conflicting,
@@ -59,20 +56,17 @@ pub enum PeerRejectDisposition {
     UnsupportedExtension,
 }
 
-/// Structured diagnostic for one peer `Reject.req`.
-///
-/// Raw Session ID, Header Byte 2, and System Bytes deliberately remain inside
-/// Core so arbitrary HSMS headers never escape through the public API.
+/// Header-safe diagnostic for one peer `Reject.req`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PeerRejectNotice {
     /// Exact non-zero base or extension reason supplied by the peer.
     reason: RejectReason,
-    /// Safe attribution result selected by Core.
+    /// Safe attribution result selected by the Core.
     disposition: PeerRejectDisposition,
 }
 
 impl PeerRejectNotice {
-    /// Creates a structured peer-rejection diagnostic after Core attribution.
+    /// Creates a peer-rejection notice from its reason and safe attribution.
     pub(crate) const fn new(reason: RejectReason, disposition: PeerRejectDisposition) -> Self {
         Self {
             reason,
@@ -86,7 +80,7 @@ impl PeerRejectNotice {
         self.reason
     }
 
-    /// Returns how Core safely attributed the peer rejection.
+    /// Returns how the Core attributed the rejected work.
     #[must_use]
     pub const fn disposition(self) -> PeerRejectDisposition {
         self.disposition
@@ -101,35 +95,11 @@ pub enum ProtocolNotice {
     Violation(ProtocolError),
     /// Structured result of attributing one peer `Reject.req`.
     PeerReject(PeerRejectNotice),
-    /// A late event from an obsolete generation was safely ignored.
+    /// A late event from an obsolete or terminal transaction was ignored.
     StaleEventIgnored,
 }
 
-#[cfg(test)]
-mod peer_reject_tests {
-    use crate::hsms::protocol::header::RejectReason;
-
-    use super::{PeerRejectDisposition, PeerRejectNotice, ProtocolNotice};
-
-    /// Confirms the public diagnostic retains reason and attribution outcome
-    /// without requiring raw header or System Bytes access.
-    #[test]
-    fn peer_reject_notice_is_structured_and_header_safe() {
-        let notice = PeerRejectNotice::new(
-            RejectReason::UNSUPPORTED_PTYPE,
-            PeerRejectDisposition::Ambiguous,
-        );
-
-        assert_eq!(notice.reason(), RejectReason::UNSUPPORTED_PTYPE);
-        assert_eq!(notice.disposition(), PeerRejectDisposition::Ambiguous);
-        assert!(matches!(
-            ProtocolNotice::PeerReject(notice),
-            ProtocolNotice::PeerReject(_)
-        ));
-    }
-}
-
-/// Reliable events published to the endpoint consumer.
+/// Reliable event published to the endpoint consumer.
 #[derive(Debug)]
 pub enum EndpointEvent {
     /// The externally observable lifecycle snapshot changed.
@@ -143,7 +113,7 @@ pub enum EndpointEvent {
         /// Stable public reason for the close.
         reason: ConnectionCloseReason,
     },
-    /// Non-data protocol diagnostic that does not itself complete a command.
+    /// Non-data protocol diagnostic that does not complete a command.
     ProtocolNotice(ProtocolNotice),
 }
 
@@ -159,9 +129,7 @@ pub struct EndpointEventEnvelope {
 }
 
 impl EndpointEventEnvelope {
-    /// Wraps `event` with its endpoint publication `sequence` and optional
-    /// originating `generation`; only the runtime event dispatcher constructs
-    /// envelopes.
+    /// Wraps an event with its publication order and optional generation.
     pub(crate) const fn new(
         sequence: EventSequence,
         generation: Option<ConnectionGeneration>,
@@ -174,27 +142,45 @@ impl EndpointEventEnvelope {
         }
     }
 
+    /// Returns the endpoint-wide publication sequence.
     #[must_use]
-    /// Returns the endpoint-wide monotonic publication sequence.
     pub const fn sequence(&self) -> u64 {
         self.sequence
     }
 
+    /// Returns the originating TCP generation, when applicable.
     #[must_use]
-    /// Returns the event's TCP generation, if it originated inside one.
     pub const fn generation(&self) -> Option<ConnectionGeneration> {
         self.generation
     }
 
-    #[must_use]
     /// Borrows the reliable endpoint event payload.
+    #[must_use]
     pub const fn event(&self) -> &EndpointEvent {
         &self.event
     }
 
-    #[must_use]
     /// Consumes the envelope and returns its event payload.
     pub fn into_event(self) -> EndpointEvent {
         self.event
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::hsms::protocol::header::RejectReason;
+
+    use super::{PeerRejectDisposition, PeerRejectNotice};
+
+    /// Confirms peer-rejection diagnostics retain safe structured information.
+    #[test]
+    fn peer_reject_notice_is_header_safe() {
+        let notice = PeerRejectNotice::new(
+            RejectReason::UNSUPPORTED_PTYPE,
+            PeerRejectDisposition::Ambiguous,
+        );
+
+        assert_eq!(notice.reason(), RejectReason::UNSUPPORTED_PTYPE);
+        assert_eq!(notice.disposition(), PeerRejectDisposition::Ambiguous);
     }
 }

@@ -1,1 +1,0 @@
-//! GenerationGuard and CleanupCoordinator boundary.
