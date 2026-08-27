@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-pub(crate) mod codec;
 pub(crate) mod frame;
+pub(crate) mod framer;
 pub(crate) mod validation;
 pub(crate) mod validator;

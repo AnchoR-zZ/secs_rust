@@ -20,8 +20,8 @@ use crate::{
             },
         },
         wire::{
-            codec::{FrameDecodeStep, FrameReadProgress, HsmsFrameDecoder, HsmsWireEncoder},
             frame::ValidatedFrame,
+            framer::{FrameDecodeStep, FrameReadProgress, HsmsFrameDecoder, HsmsWireEncoder},
             validation::{FrameEncodeError, FramingFault},
             validator::StrictFrameValidator,
         },
