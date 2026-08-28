@@ -107,3 +107,40 @@ pub const HSMS_REJECT_REQUEST: &[u8] = &[
 pub const PARTIAL_LENGTH_PREFIX: &[u8] = &[0x00, 0x00];
 pub const PARTIAL_FRAME: &[u8] = &[0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x01, 0x01];
 pub const OVERSIZED_LENGTH_PREFIX: &[u8] = &[0xFF, 0xFF, 0xFF, 0xFF];
+
+// ---------------------------------------------------------------------------
+// SML canonical text vectors
+// ---------------------------------------------------------------------------
+//
+// Used by the `sml_conformance` target. Like the byte fixtures above, these
+// strings are pinned by hand: a change in the canonical formatter must not
+// silently change any character, which is what keeps SML round-trips stable.
+
+/// Canonical Compact SML for an S5F1 alarm report: W-Bit set, a Binary alarm
+/// code, and an ASCII LOT id under a two-element list.
+pub const SML_S5F1_ALARM_COMPACT: &str = r#"S5F1 W <L[2] <B[1] 0x04> <A[6] "LOT001">>."#;
+
+/// Canonical Pretty SML for the same S5F1 alarm report: two-space indent, LF
+/// breaks, closing `>` on its own line, terminator glued to the final line.
+pub const SML_S5F1_ALARM_PRETTY: &str = "S5F1 W <L[2]\n  <B[1] 0x04>\n  <A[6] \"LOT001\">\n>.";
+
+/// Canonical Compact SML for a nested list mixing a quoted ASCII leaf and an
+/// empty Binary leaf, used as the generic item-level golden.
+pub const SML_NESTED_LIST_COMPACT: &str = r#"<L[2] <A[1] "x"> <B[0]>>"#;
+
+/// Canonical Pretty SML for the same nested list.
+pub const SML_NESTED_LIST_PRETTY: &str = "<L[2]\n  <A[1] \"x\">\n  <B[0]>\n>";
+
+/// Canonical Compact SML equivalent of the wire item [`SECS2_ASCII_HELLO`].
+pub const SML_ASCII_HELLO: &str = r#"<A[5] "HELLO">"#;
+
+/// Canonical Compact SML equivalent of the wire item [`SECS2_BINARY_AA`].
+pub const SML_BINARY_AA: &str = "<B[1] 0xAA>";
+
+/// Canonical Compact SML equivalent of the wire item
+/// [`SECS2_I2_THREE_VALUES`] (`0x0102, 0x0304, 0x0506` as decimals).
+pub const SML_I2_THREE_VALUES: &str = "<I2[3] 258 772 1286>";
+
+/// Canonical Compact SML equivalent of the wire item [`SECS2_F4_ONE`]: the
+/// integral float `1.0` always carries a `.0` suffix so it lexes as a float.
+pub const SML_F4_ONE: &str = "<F4[1] 1.0>";
