@@ -5,7 +5,7 @@
 
 use std::future::Future;
 
-use crate::hsms::ConnectionGeneration;
+use crate::hsms::{model::runtime::GenerationCloseReason, ConnectionGeneration};
 
 /// Reason cleanup could not prove that a generation released all resources.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,32 +27,13 @@ pub(crate) enum CleanupResult {
     Poisoned(CleanupPoison),
 }
 
-/// Terminal reason reported by one generation-scoped SessionDriver.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SessionExitReason {
-    /// The logical endpoint was stopped locally.
-    LocalStop,
-    /// The application requested disconnection of this generation.
-    LocalDisconnect,
-    /// The application sent `Separate.req` and then ended this generation.
-    LocalSeparate,
-    /// The peer sent `Separate.req`.
-    SeparateReceived,
-    /// The TCP transport ended or became unusable.
-    TransportLost,
-    /// Protocol invariants required termination.
-    ProtocolViolation,
-    /// Reliable application event delivery could not accept more data.
-    ApplicationBackpressure,
-}
-
 /// Complete terminal report for one launched generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SessionExit {
     /// TCP incarnation whose SessionDriver exited.
     pub(crate) generation: ConnectionGeneration,
     /// Event that initiated or forced termination.
-    pub(crate) reason: SessionExitReason,
+    pub(crate) reason: GenerationCloseReason,
     /// Proof of whether all owned resources were released.
     pub(crate) cleanup: CleanupResult,
 }

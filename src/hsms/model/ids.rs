@@ -140,6 +140,14 @@ internal_id!(
     "Identifies one single-use authority to reply to an inbound primary."
 );
 internal_id!(
+    CommandId,
+    "Identifies one accepted generation-local command."
+);
+internal_id!(
+    WriteId,
+    "Identifies one Core-produced generation-local frame."
+);
+internal_id!(
     WireSequence,
     "Identifies one frame position in generation-local wire order. \
      `WriterAdapter` assigns it only after accepting a frame and \
@@ -171,5 +179,61 @@ impl SystemBytes {
     /// Returns the four-byte transaction correlation value.
     pub(crate) const fn get(self) -> u32 {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{any::TypeId, collections::HashSet};
+
+    use super::{CommandId, WireSequence, WriteId};
+
+    /// Confirms internal identifiers retain their values and total ordering.
+    #[test]
+    fn internal_identifiers_have_value_semantics() {
+        let lower = CommandId::new(17);
+        let equal = CommandId::new(17);
+        let higher = CommandId::new(18);
+
+        assert_eq!(lower, equal);
+        assert!(lower < higher);
+        assert_eq!(lower.get(), 17);
+
+        let mut identities = HashSet::new();
+        assert!(identities.insert(lower));
+        assert!(!identities.insert(equal));
+        assert!(identities.insert(higher));
+    }
+
+    /// Confirms command, Core-write, and Writer-order identifiers remain
+    /// distinct type-level facts even when their numeric values coincide.
+    #[test]
+    fn correlation_identifiers_are_distinct_types() {
+        assert_ne!(TypeId::of::<CommandId>(), TypeId::of::<WriteId>());
+        assert_ne!(TypeId::of::<WriteId>(), TypeId::of::<WireSequence>());
+        assert_ne!(TypeId::of::<CommandId>(), TypeId::of::<WireSequence>());
+
+        assert_eq!(CommandId::new(23).get(), 23);
+        assert_eq!(WriteId::new(23).get(), 23);
+        assert_eq!(WireSequence::new(23).get(), 23);
+    }
+
+    /// Confirms the frozen correlation identifiers are inexpensive copyable
+    /// values suitable for map keys without sharing allocator ownership.
+    #[test]
+    fn correlation_identifiers_are_copy_values() {
+        /// Requires `T` to implement `Copy` and returns both copied values.
+        fn copy_twice<T: Copy>(value: T) -> (T, T) {
+            (value, value)
+        }
+
+        assert_eq!(
+            copy_twice(CommandId::new(u64::MAX)),
+            (CommandId::new(u64::MAX), CommandId::new(u64::MAX))
+        );
+        assert_eq!(
+            copy_twice(WriteId::new(u64::MAX)),
+            (WriteId::new(u64::MAX), WriteId::new(u64::MAX))
+        );
     }
 }

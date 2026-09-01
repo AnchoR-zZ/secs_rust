@@ -3,6 +3,7 @@
 pub mod api;
 mod codec;
 pub mod config;
+mod core;
 pub mod error;
 mod generation;
 pub mod lifecycle;
