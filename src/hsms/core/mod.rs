@@ -8,6 +8,8 @@
 
 mod action;
 mod command;
+mod session;
 
 pub(crate) use action::{CoreAction, CoreActions};
 pub(crate) use command::{CoreCommand, CoreCommandKind, CoreCommandResult};
+pub(crate) use session::{SessionCore, SessionCoreConfig};
