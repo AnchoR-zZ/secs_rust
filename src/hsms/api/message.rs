@@ -59,6 +59,12 @@ impl PrimaryMessage {
     pub fn into_body(self) -> Option<SecsItem> {
         self.body
     }
+
+    /// Consumes the public message into the application-owned fields that the
+    /// generation Driver translates into one internal outbound Data command.
+    pub(crate) fn into_parts(self) -> (Stream, Function, Option<SecsItem>) {
+        (self.stream, self.function, self.body)
+    }
 }
 
 /// A validated secondary returned by a pending request.
@@ -73,7 +79,8 @@ pub struct SecondaryMessage {
 }
 
 impl SecondaryMessage {
-    /// Creates a Secondary after the protocol core validates its transaction.
+    /// Creates a Secondary from fields validated by the protocol core's
+    /// response matcher and transferred through the Driver completion path.
     pub(crate) const fn new(stream: Stream, function: Function, body: Option<SecsItem>) -> Self {
         Self {
             stream,
@@ -246,9 +253,49 @@ impl InboundPrimary {
 mod tests {
     use std::sync::Arc;
 
-    use crate::hsms::model::ids::{ConnectionGeneration, ReplyCapabilityId};
+    use crate::{
+        hsms::model::ids::{ConnectionGeneration, Function, ReplyCapabilityId, Stream},
+        secs2::SecsItem,
+    };
 
-    use super::{DataEventToken, ReplyToken};
+    use super::{DataEventToken, PrimaryMessage, ReplyToken, SecondaryMessage};
+
+    /// Creates the fixed stream used by API message ownership tests.
+    fn stream() -> Stream {
+        Stream::new(7).expect("fixture stream is valid")
+    }
+
+    /// Confirms Driver translation can consume a Primary without cloning and
+    /// retains absent Message Text as an explicit `None` value.
+    #[test]
+    fn primary_into_parts_transfers_owned_fields_without_body() {
+        let message = PrimaryMessage::new(stream(), Function::new(1), None);
+
+        let (actual_stream, function, body) = message.into_parts();
+
+        assert_eq!(actual_stream, stream());
+        assert_eq!(function, Function::new(1));
+        assert_eq!(body, None);
+    }
+
+    /// Confirms consuming Primary translation and crate-private Secondary
+    /// construction preserve typed-empty Message Text rather than merging it
+    /// with absent text.
+    #[test]
+    fn data_message_parts_preserve_typed_empty_body() {
+        let body = Some(SecsItem::List(Vec::new()));
+        let primary = PrimaryMessage::new(stream(), Function::new(3), body.clone());
+
+        let (actual_stream, function, transferred_body) = primary.into_parts();
+        assert_eq!(actual_stream, stream());
+        assert_eq!(function, Function::new(3));
+        assert_eq!(transferred_body, body);
+
+        let secondary = SecondaryMessage::new(stream(), Function::new(4), transferred_body);
+        assert_eq!(secondary.stream(), stream());
+        assert_eq!(secondary.function(), Function::new(4));
+        assert_eq!(secondary.into_body(), body);
+    }
 
     /// Confirms opaque inbound tokens do not reveal correlation identities.
     #[test]

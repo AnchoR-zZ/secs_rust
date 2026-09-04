@@ -18,7 +18,8 @@ pub struct SendReceipt {
 }
 
 impl SendReceipt {
-    /// Creates a receipt for a committed `wire_sequence` in `generation`.
+    /// Creates a receipt after Driver combines Core's committed-write identity
+    /// with the Writer-owned `wire_sequence` for `generation`.
     pub(crate) const fn new(generation: ConnectionGeneration, wire_sequence: WireSequence) -> Self {
         Self {
             generation,
@@ -36,5 +37,23 @@ impl SendReceipt {
     #[must_use]
     pub const fn wire_sequence(self) -> u64 {
         self.wire_sequence
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::hsms::model::ids::{ConnectionGeneration, WireSequence};
+
+    use super::SendReceipt;
+
+    /// Confirms the crate-private Driver construction boundary preserves the
+    /// exact generation and Writer-assigned total-order position.
+    #[test]
+    fn send_receipt_preserves_driver_and_writer_facts() {
+        let generation = ConnectionGeneration::new(17);
+        let receipt = SendReceipt::new(generation, WireSequence::new(41));
+
+        assert_eq!(receipt.generation(), generation);
+        assert_eq!(receipt.wire_sequence(), 41);
     }
 }

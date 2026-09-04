@@ -25,7 +25,7 @@ use crate::hsms::{
 };
 
 use super::test_support::{DriverHarness, FakeWriterOutcomeError, HarnessInput, TraceEvent};
-use super::{ControlAdmissionErrorKind, SessionDriver};
+use super::{ControlAdmissionErrorKind, DriverCommandResult, SessionDriver};
 
 /// Builds a terminal transport fault with a stable test category.
 fn transport_fault() -> TransportFault {
@@ -33,11 +33,13 @@ fn transport_fault() -> TransportFault {
 }
 
 /// Extracts a control completion result received without blocking.
-fn completion_result(receiver: &Receiver<CoreCommandResult>) -> Result<(), OperationError> {
+fn completion_result(receiver: &Receiver<DriverCommandResult>) -> Result<(), OperationError> {
     let result = receiver
         .try_recv()
         .expect("command must have one completion available");
-    let CoreCommandResult::Control(result) = result;
+    let DriverCommandResult::Control(result) = result else {
+        panic!("control command must retain its Driver result type");
+    };
     result
 }
 

@@ -1,15 +1,19 @@
-//! Runtime-neutral Session Core command and ordered-action contracts.
+//! Runtime-neutral Session Core with owned commands and ordered actions.
 //!
-//! This module freezes the values exchanged between `SessionDriver` and the
-//! future deterministic `SessionCore`. It deliberately contains no runtime,
-//! transport, channel, socket, or clock implementation.
+//! This module implements deterministic B1 control and minimal B2 Data behavior
+//! behind the values exchanged with `SessionDriver`. It deliberately contains
+//! no runtime, transport, channel, socket, or clock implementation.
 
 #![allow(dead_code, unused_imports)]
 
 mod action;
 mod command;
 mod session;
+mod transaction;
 
 pub(crate) use action::{CoreAction, CoreActions};
-pub(crate) use command::{CoreCommand, CoreCommandKind, CoreCommandResult};
+pub(crate) use command::{
+    CommittedWrite, CoreCommand, CoreCommandKind, CoreCommandResult, MatchedSecondary,
+    OutboundPrimary,
+};
 pub(crate) use session::{SessionCore, SessionCoreConfig};
