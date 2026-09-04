@@ -402,8 +402,7 @@ impl<'a> DecodeCursor<'a> {
             FormatCode::Localized => self.decode_localized(header_offset, body)?,
             FormatCode::I8 => {
                 let mut values = Vec::with_capacity(body_len / 8);
-                for chunk in body.chunks_exact(8) {
-                    let arr: [u8; 8] = chunk.try_into().expect("chunk is exactly 8 bytes");
+                for &arr in body.as_chunks::<8>().0 {
                     values.push(i64::from_be_bytes(arr));
                 }
                 SecsItem::I8(values)
@@ -414,40 +413,35 @@ impl<'a> DecodeCursor<'a> {
             }
             FormatCode::I2 => {
                 let mut values = Vec::with_capacity(body_len / 2);
-                for chunk in body.chunks_exact(2) {
-                    let arr: [u8; 2] = chunk.try_into().expect("chunk is exactly 2 bytes");
+                for &arr in body.as_chunks::<2>().0 {
                     values.push(i16::from_be_bytes(arr));
                 }
                 SecsItem::I2(values)
             }
             FormatCode::I4 => {
                 let mut values = Vec::with_capacity(body_len / 4);
-                for chunk in body.chunks_exact(4) {
-                    let arr: [u8; 4] = chunk.try_into().expect("chunk is exactly 4 bytes");
+                for &arr in body.as_chunks::<4>().0 {
                     values.push(i32::from_be_bytes(arr));
                 }
                 SecsItem::I4(values)
             }
             FormatCode::F8 => {
                 let mut values = Vec::with_capacity(body_len / 8);
-                for chunk in body.chunks_exact(8) {
-                    let arr: [u8; 8] = chunk.try_into().expect("chunk is exactly 8 bytes");
+                for &arr in body.as_chunks::<8>().0 {
                     values.push(f64::from_bits(u64::from_be_bytes(arr)));
                 }
                 SecsItem::F8(values)
             }
             FormatCode::F4 => {
                 let mut values = Vec::with_capacity(body_len / 4);
-                for chunk in body.chunks_exact(4) {
-                    let arr: [u8; 4] = chunk.try_into().expect("chunk is exactly 4 bytes");
+                for &arr in body.as_chunks::<4>().0 {
                     values.push(f32::from_bits(u32::from_be_bytes(arr)));
                 }
                 SecsItem::F4(values)
             }
             FormatCode::U8 => {
                 let mut values = Vec::with_capacity(body_len / 8);
-                for chunk in body.chunks_exact(8) {
-                    let arr: [u8; 8] = chunk.try_into().expect("chunk is exactly 8 bytes");
+                for &arr in body.as_chunks::<8>().0 {
                     values.push(u64::from_be_bytes(arr));
                 }
                 SecsItem::U8(values)
@@ -455,16 +449,14 @@ impl<'a> DecodeCursor<'a> {
             FormatCode::U1 => SecsItem::U1(body.to_vec()),
             FormatCode::U2 => {
                 let mut values = Vec::with_capacity(body_len / 2);
-                for chunk in body.chunks_exact(2) {
-                    let arr: [u8; 2] = chunk.try_into().expect("chunk is exactly 2 bytes");
+                for &arr in body.as_chunks::<2>().0 {
                     values.push(u16::from_be_bytes(arr));
                 }
                 SecsItem::U2(values)
             }
             FormatCode::U4 => {
                 let mut values = Vec::with_capacity(body_len / 4);
-                for chunk in body.chunks_exact(4) {
-                    let arr: [u8; 4] = chunk.try_into().expect("chunk is exactly 4 bytes");
+                for &arr in body.as_chunks::<4>().0 {
                     values.push(u32::from_be_bytes(arr));
                 }
                 SecsItem::U4(values)
