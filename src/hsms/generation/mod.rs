@@ -1,5 +1,7 @@
-//! Target boundaries for one TCP generation's future runtime implementation.
+//! Single-owner protocol execution and bounded transport tasks for one TCP generation.
 
 pub(crate) mod driver;
-pub(crate) mod event_port;
 pub(crate) mod transport;
+
+#[cfg(feature = "runtime-tokio")]
+pub(crate) mod runtime;

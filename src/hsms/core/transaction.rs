@@ -68,6 +68,21 @@ pub(crate) struct ResponseContract {
 }
 
 impl ResponseContract {
+    /// Reconstructs the exact outbound Primary header retained by this contract.
+    /// The absent normal function uniquely identifies the valid F255 Primary.
+    pub(crate) fn request_header(self) -> DataHeader {
+        let function = self
+            .normal_function
+            .map_or(255, |function| function.get() - 1);
+        DataHeader::new(
+            self.session_id,
+            self.stream,
+            Function::new(function),
+            true,
+            self.system_bytes,
+        )
+    }
+
     /// Compiles a response contract from one outbound Primary tuple.
     ///
     /// `primary_function` is expected to have already passed Core's non-zero
@@ -88,22 +103,13 @@ impl ResponseContract {
         }
     }
 
-    /// Returns the Data Session ID required by this contract.
-    pub(crate) const fn session_id(self) -> SessionId {
-        self.session_id
-    }
-
     /// Returns the System Bytes required by this contract.
     pub(crate) const fn system_bytes(self) -> SystemBytes {
         self.system_bytes
     }
 
-    /// Returns the request stream required by normal and abort matches.
-    pub(crate) const fn stream(self) -> Stream {
-        self.stream
-    }
-
     /// Returns the checked normal function, absent for abort-only F255.
+    #[cfg(test)]
     pub(crate) const fn normal_function(self) -> Option<Function> {
         self.normal_function
     }
@@ -133,6 +139,7 @@ impl ResponseContract {
     }
 
     /// Returns whether Data tuple fields shared by Secondary and Reject match.
+    #[cfg(test)]
     pub(crate) fn matches_correlation(self, session_id: u16, system_bytes: SystemBytes) -> bool {
         self.session_id.get() == session_id && self.system_bytes == system_bytes
     }
@@ -177,7 +184,7 @@ impl TransactionTombstones {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            entries: VecDeque::with_capacity(capacity),
+            entries: VecDeque::new(),
         }
     }
 
@@ -200,6 +207,7 @@ impl TransactionTombstones {
     }
 
     /// Returns whether a retained contract has this Reject correlation tuple.
+    #[cfg(test)]
     pub(crate) fn contains_correlation(&self, session_id: u16, system_bytes: SystemBytes) -> bool {
         self.entries
             .iter()
@@ -220,6 +228,7 @@ impl TransactionTombstones {
     }
 
     /// Returns the number of retained completed contracts.
+    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }

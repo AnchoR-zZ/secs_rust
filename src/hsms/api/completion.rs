@@ -1,12 +1,11 @@
 //! Public completion receipts produced after outbound frames commit locally.
 //!
-//! The future writer will own wire ordering; the protocol core will combine
-//! its terminal outcome with the current generation to construct receipts.
+//! Writer assigns wire ordering. Driver combines its actual committed outcome
+//! with the connection generation to construct the public receipt.
 
-// Construction becomes production-reachable with the future endpoint runtime.
-#![allow(dead_code)]
-
-use crate::hsms::model::ids::{ConnectionGeneration, WireSequence};
+use crate::hsms::model::ids::ConnectionGeneration;
+#[cfg(any(feature = "runtime-tokio", test))]
+use crate::hsms::model::ids::WireSequence;
 
 /// Proof that one complete frame reached the local writer commit point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +19,7 @@ pub struct SendReceipt {
 impl SendReceipt {
     /// Creates a receipt after Driver combines Core's committed-write identity
     /// with the Writer-owned `wire_sequence` for `generation`.
+    #[cfg(any(feature = "runtime-tokio", test))]
     pub(crate) const fn new(generation: ConnectionGeneration, wire_sequence: WireSequence) -> Self {
         Self {
             generation,

@@ -7,41 +7,12 @@
 use crate::{
     hsms::{
         error::OperationError,
-        model::ids::{CommandId, Function, Stream, WriteId},
+        model::ids::{CommandId, WriteId},
     },
     secs2::SecsItem,
 };
 
-/// Application-supplied fields of one outbound SECS Primary message.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct OutboundPrimary {
-    /// Seven-bit SECS stream selected by the application.
-    stream: Stream,
-    /// SECS function whose Primary validity is checked by Core.
-    function: Function,
-    /// Message Text, preserving `None` separately from a typed empty item.
-    body: Option<SecsItem>,
-}
-
-impl OutboundPrimary {
-    /// Creates owned Primary content for transfer from Driver to Core.
-    ///
-    /// `stream`, `function`, and `body` are retained exactly. Primary-function
-    /// validation and protocol-header allocation occur only after Core accepts
-    /// the command.
-    pub(crate) const fn new(stream: Stream, function: Function, body: Option<SecsItem>) -> Self {
-        Self {
-            stream,
-            function,
-            body,
-        }
-    }
-
-    /// Consumes the content into its stream, function, and optional body.
-    pub(crate) fn into_parts(self) -> (Stream, Function, Option<SecsItem>) {
-        (self.stream, self.function, self.body)
-    }
-}
+pub(crate) use crate::secs2::PrimaryMessage as OutboundPrimary;
 
 /// One Driver-accepted command presented to Session Core.
 #[derive(Debug, PartialEq)]
@@ -59,13 +30,9 @@ impl CoreCommand {
     }
 
     /// Returns the Driver-assigned command identity without consuming payload.
+    #[cfg(test)]
     pub(crate) const fn command_id(&self) -> CommandId {
         self.command_id
-    }
-
-    /// Borrows the protocol intent without cloning an owned Data body.
-    pub(crate) const fn kind(&self) -> &CoreCommandKind {
-        &self.kind
     }
 
     /// Consumes the command into its identity and owned protocol intent.
@@ -74,9 +41,11 @@ impl CoreCommand {
     }
 }
 
-/// Protocol intents implemented by the B2 runtime-neutral Core slice.
+/// Protocol intents implemented by the runtime-neutral Session Core.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum CoreCommandKind {
+    /// Drains Data work before initiating a transactional HSMS Deselect.
+    Deselect,
     /// Initiates an active HSMS Select transaction.
     Select,
     /// Initiates an active HSMS Linktest transaction.
@@ -111,33 +80,34 @@ impl CommittedWrite {
 /// Core-validated Secondary content returned by an outbound Request.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MatchedSecondary {
-    /// Stream proven equal to the pending response contract.
-    stream: Stream,
-    /// Normal Secondary function proven to be the checked Primary F+1 value.
-    function: Function,
+    /// Complete received header proven to match the pending response contract.
+    header: crate::hsms::protocol::header::DataHeader,
     /// Matched Message Text, preserving absent and typed-empty forms.
     body: Option<SecsItem>,
 }
 
 impl MatchedSecondary {
     /// Creates a result from fields already validated by the Core matcher.
-    pub(crate) const fn new(stream: Stream, function: Function, body: Option<SecsItem>) -> Self {
-        Self {
-            stream,
-            function,
-            body,
-        }
+    pub(crate) const fn new(
+        header: crate::hsms::protocol::header::DataHeader,
+        body: Option<SecsItem>,
+    ) -> Self {
+        Self { header, body }
     }
 
     /// Consumes the result into fields used to construct the public Secondary.
-    pub(crate) fn into_parts(self) -> (Stream, Function, Option<SecsItem>) {
-        (self.stream, self.function, self.body)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (crate::hsms::protocol::header::DataHeader, Option<SecsItem>) {
+        (self.header, self.body)
     }
 }
 
 /// Typed terminal result delivered for one accepted Core command.
 #[derive(Debug, PartialEq)]
 pub(crate) enum CoreCommandResult {
+    /// T3 expiry retaining the exact outbound header for application diagnostics.
+    RequestTimedOut(crate::hsms::protocol::header::DataHeader),
     /// Completion of a control operation with its stable operation error.
     Control(Result<(), OperationError>),
     /// Completion of an outbound W=0 Primary at commit or stable failure.
@@ -215,7 +185,14 @@ mod tests {
         );
         assert_eq!(CommittedWrite::new(write_id).write_id(), write_id);
 
-        let matched = MatchedSecondary::new(stream(), Function::new(2), body.clone());
-        assert_eq!(matched.into_parts(), (stream(), Function::new(2), body));
+        let header = crate::hsms::protocol::header::DataHeader::new(
+            crate::hsms::SessionId::new(7).unwrap(),
+            stream(),
+            Function::new(2),
+            false,
+            crate::hsms::model::ids::SystemBytes::new(42),
+        );
+        let matched = MatchedSecondary::new(header, body.clone());
+        assert_eq!(matched.into_parts(), (header, body));
     }
 }

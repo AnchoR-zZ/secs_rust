@@ -4,15 +4,18 @@
 //! describes recoverable header and Message Text violations for which Core may
 //! choose an ordered E37 response without depending on codec error internals.
 
+#[cfg(any(feature = "runtime-tokio", test))]
 use super::header::DataHeader;
 
 /// Exact ten-byte header snapshot associated with a recoverable violation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "runtime-tokio", test))]
 pub(crate) struct HeaderSnapshot(
     /// Header bytes in E37 wire order, excluding the four-byte length prefix.
     [u8; 10],
 );
 
+#[cfg(any(feature = "runtime-tokio", test))]
 impl HeaderSnapshot {
     /// Preserves all ten unmodified `bytes` for Core diagnostics and Reject
     /// construction.
@@ -28,16 +31,6 @@ impl HeaderSnapshot {
     /// Returns the raw two-byte Session ID.
     pub(crate) const fn session_id(self) -> u16 {
         u16::from_be_bytes([self.0[0], self.0[1]])
-    }
-
-    /// Returns raw Header Byte 2.
-    pub(crate) const fn header_byte_2(self) -> u8 {
-        self.0[2]
-    }
-
-    /// Returns raw Header Byte 3.
-    pub(crate) const fn header_byte_3(self) -> u8 {
-        self.0[3]
     }
 
     /// Returns the raw Presentation Type byte.
@@ -58,6 +51,7 @@ impl HeaderSnapshot {
 
 /// Recoverable structural header failure found after length framing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "runtime-tokio", test))]
 pub(crate) struct HeaderViolation {
     /// Exact header snapshot needed for ordered protocol handling.
     header: HeaderSnapshot,
@@ -65,6 +59,7 @@ pub(crate) struct HeaderViolation {
     kind: HeaderViolationKind,
 }
 
+#[cfg(any(feature = "runtime-tokio", test))]
 impl HeaderViolation {
     /// Creates a recoverable header violation from the exact `header` and its
     /// classified semantic `kind`.
@@ -85,7 +80,7 @@ impl HeaderViolation {
 
 /// Stable recoverable header-violation categories understood by Core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HeaderViolationKind {
+pub enum HeaderViolationKind {
     /// A header-only control message incorrectly carried Message Text.
     ControlMessageHasText,
     /// A Data message used the control-reserved `0xFFFF` Session ID.
@@ -108,6 +103,7 @@ pub(crate) enum HeaderViolationKind {
 
 /// Stable classification of malformed SECS-II Message Text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "runtime-tokio", test))]
 pub(crate) struct PayloadViolation {
     /// Validated Data header associated with the malformed Message Text.
     header: DataHeader,
@@ -115,6 +111,7 @@ pub(crate) struct PayloadViolation {
     kind: PayloadViolationKind,
 }
 
+#[cfg(any(feature = "runtime-tokio", test))]
 impl PayloadViolation {
     /// Creates a payload violation for `header` with the classified `kind`.
     pub(crate) const fn new(header: DataHeader, kind: PayloadViolationKind) -> Self {
@@ -134,7 +131,7 @@ impl PayloadViolation {
 
 /// Coarse Message Text failure classes used for protocol decisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PayloadViolationKind {
+pub enum PayloadViolationKind {
     /// Message Text is not exactly one well-formed SECS-II item.
     MalformedSecs2,
     /// Decoding was refused by a configured resource bound.
@@ -143,6 +140,7 @@ pub(crate) enum PayloadViolationKind {
 
 /// Any recoverable inbound violation that may require a Core response.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "runtime-tokio", test))]
 pub(crate) enum InboundViolation {
     /// Structurally invalid ten-byte HSMS header.
     Header(HeaderViolation),

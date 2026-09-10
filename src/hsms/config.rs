@@ -1,8 +1,8 @@
 //! Validated configuration for one long-lived HSMS endpoint.
 //!
 //! The types in this file define connection role, protocol timers, bounded
-//! resource capacities, and the SECS-II decoding policy consumed by later
-//! lifecycle and generation-runtime implementations.
+//! resource capacities, and the SECS-II decoding policy consumed by the
+//! lifecycle and generation-runtime components.
 
 use std::{net::SocketAddr, time::Duration};
 
@@ -13,6 +13,9 @@ use crate::{
 
 /// Minimum E37 Message Length: the mandatory ten-byte HSMS header.
 const HSMS_HEADER_LENGTH: usize = 10;
+
+mod runtime;
+pub use runtime::RuntimePolicy;
 
 /// Whether this endpoint initiates or accepts the TCP connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,7 +33,7 @@ pub struct HsmsTimeouts {
     connect: Duration,
     /// E37 reply timeout for a sent primary Data message.
     t3: Duration,
-    /// E37 delay between active connection attempts.
+    /// E37 delay after an active connection attempt ends before the next starts.
     t5: Duration,
     /// E37 control-transaction response timeout.
     t6: Duration,
@@ -111,7 +114,7 @@ impl HsmsTimeouts {
     }
 
     #[must_use]
-    /// Returns the E37 T5 reconnect delay.
+    /// Returns the E37 T5 delay after an active attempt ends.
     pub const fn t5(self) -> Duration {
         self.t5
     }
@@ -304,7 +307,7 @@ impl EndpointLimits {
 }
 
 impl Default for EndpointLimits {
-    /// Returns bounded, general-purpose endpoint capacities for Wave 0.
+    /// Returns bounded, general-purpose endpoint capacities.
     fn default() -> Self {
         Self {
             max_message_length: 16 * 1024 * 1024,
@@ -322,6 +325,8 @@ impl Default for EndpointLimits {
 /// Validatable configuration for one long-lived logical HSMS endpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EndpointConfig {
+    /// Runtime byte budgets, local deadlines and automatic selection policy.
+    runtime: RuntimePolicy,
     /// Whether the endpoint actively connects or passively accepts.
     mode: ConnectionMode,
     /// Peer address in active mode or local bind address in passive mode.
@@ -355,6 +360,7 @@ impl EndpointConfig {
     /// and `session_id`, installing default timer and resource policies.
     fn new(mode: ConnectionMode, address: SocketAddr, session_id: SessionId) -> Self {
         Self {
+            runtime: RuntimePolicy::default(),
             mode,
             address,
             session_id,
@@ -369,6 +375,18 @@ impl EndpointConfig {
     pub fn with_timeouts(mut self, timeouts: HsmsTimeouts) -> Self {
         self.timeouts = timeouts;
         self
+    }
+
+    /// Replaces runtime resource and lifecycle policy; validate before starting.
+    #[must_use]
+    pub fn with_runtime(mut self, runtime: RuntimePolicy) -> Self {
+        self.runtime = runtime;
+        self
+    }
+
+    /// Returns runtime byte budgets, local deadlines and automatic selection policy.
+    pub const fn runtime(&self) -> RuntimePolicy {
+        self.runtime
     }
 
     #[must_use]
@@ -395,6 +413,7 @@ impl EndpointConfig {
         self.timeouts.validate()?;
         self.limits.validate()?;
         self.secs2_limits.validate()?;
+        self.runtime.validate(self.limits, self.timeouts)?;
         Ok(())
     }
 

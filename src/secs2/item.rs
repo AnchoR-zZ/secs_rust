@@ -198,3 +198,29 @@ pub enum SecsItem {
     /// Four-byte unsigned integers.
     U4(Vec<u32>),
 }
+
+impl SecsItem {
+    /// 临时调试用：返回该 item 的类型短名，便于断点观察面板快速识别，
+    /// 不参与任何业务逻辑，仅在 debug 构建下存在。
+    #[cfg(debug_assertions)]
+    pub fn debug_type_name(&self) -> &'static str {
+        match self {
+            Self::List(_) => "List",
+            Self::Binary(_) => "Binary",
+            Self::Boolean(_) => "Boolean",
+            Self::Ascii(_) => "Ascii",
+            Self::Jis8(_) => "Jis8",
+            Self::Localized(_) => "Localized",
+            Self::I8(_) => "I8",
+            Self::I1(_) => "I1",
+            Self::I2(_) => "I2",
+            Self::I4(_) => "I4",
+            Self::F8(_) => "F8",
+            Self::F4(_) => "F4",
+            Self::U8(_) => "U8",
+            Self::U1(_) => "U1",
+            Self::U2(_) => "U2",
+            Self::U4(_) => "U4",
+        }
+    }
+}

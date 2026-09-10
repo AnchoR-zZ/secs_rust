@@ -19,6 +19,7 @@ pub struct ConnectionGeneration(
 
 impl ConnectionGeneration {
     /// Creates an internally allocated generation identifier from `value`.
+    #[cfg(any(feature = "runtime-tokio", test))]
     pub(crate) const fn new(value: u64) -> Self {
         Self(value)
     }
@@ -63,57 +64,13 @@ impl SessionId {
     }
 }
 
-/// A seven-bit SECS stream number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Stream(
-    /// Seven-bit stream number with no W-bit mixed into the value.
-    u8,
-);
-
-impl Stream {
-    /// Validates and returns a stream number created from `value`.
-    ///
-    /// Returns [`IdentifierError::StreamOutOfRange`] when `value` cannot fit in
-    /// the seven stream bits of an HSMS Data header.
-    pub fn new(value: u8) -> Result<Self, IdentifierError> {
-        if value > 0x7F {
-            return Err(IdentifierError::StreamOutOfRange { value });
-        }
-        Ok(Self(value))
-    }
-
-    #[must_use]
-    /// Returns the validated seven-bit stream number.
-    pub const fn get(self) -> u8 {
-        self.0
-    }
-}
-
-/// A SECS function number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Function(
-    /// Full eight-bit SECS function number.
-    u8,
-);
-
-impl Function {
-    #[must_use]
-    /// Wraps the eight-bit SECS function `value` without further restrictions.
-    pub const fn new(value: u8) -> Self {
-        Self(value)
-    }
-
-    #[must_use]
-    /// Returns the SECS function number.
-    pub const fn get(self) -> u8 {
-        self.0
-    }
-}
+pub use crate::secs2::{Function, Stream};
 
 /// Defines a crate-private monotonic `u64` identifier with controlled
 /// construction and read-only numeric access.
+#[cfg(any(feature = "runtime-tokio", test))]
 macro_rules! internal_id {
-    ($name:ident, $description:literal) => {
+    ($name:ident, $description:literal $(, $getter_gate:meta)?) => {
         #[doc = $description]
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub(crate) struct $name(
@@ -128,6 +85,7 @@ macro_rules! internal_id {
             }
 
             #[doc = concat!("Returns the numeric value of this `", stringify!($name), "`.")]
+            $(#[$getter_gate])?
             pub(crate) const fn get(self) -> u64 {
                 self.0
             }
@@ -135,41 +93,55 @@ macro_rules! internal_id {
     };
 }
 
-internal_id!(
-    ReplyCapabilityId,
-    "Identifies one single-use authority to reply to an inbound primary."
+/// Identifies a single-use reply authority without exposing its numeric contents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg(any(feature = "runtime-tokio", test))]
+pub(crate) struct ReplyCapabilityId(
+    /// Opaque value allocated only by the owning generation's Core.
+    u64,
 );
+#[cfg(any(feature = "runtime-tokio", test))]
+impl ReplyCapabilityId {
+    /// Creates an internally allocated reply identity from `value`.
+    pub(crate) const fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+#[cfg(any(feature = "runtime-tokio", test))]
 internal_id!(
     CommandId,
-    "Identifies one accepted generation-local command."
+    "Identifies one accepted generation-local command.",
+    cfg(test)
 );
+#[cfg(any(feature = "runtime-tokio", test))]
 internal_id!(
     WriteId,
-    "Identifies one Core-produced generation-local frame."
+    "Identifies one Core-produced generation-local frame.",
+    cfg(test)
 );
+#[cfg(any(feature = "runtime-tokio", test))]
 internal_id!(
     WireSequence,
     "Identifies one frame position in generation-local wire order. \
-     `WriterAdapter` assigns it only after accepting a frame and \
+     The generation Writer assigns it only after accepting a frame and \
      never reuses it within the connection generation."
 );
+#[cfg(feature = "runtime-tokio")]
 internal_id!(
     LifecycleSequence,
     "Identifies one linearized endpoint lifecycle revision."
-);
-internal_id!(
-    EventSequence,
-    "Identifies one event in endpoint publication order."
 );
 
 /// HSMS System Bytes. This value is allocated internally and never accepted
 /// from the application API.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg(any(feature = "runtime-tokio", test))]
 pub(crate) struct SystemBytes(
     /// Four-byte transaction correlation value allocated by the protocol core.
     u32,
 );
 
+#[cfg(any(feature = "runtime-tokio", test))]
 impl SystemBytes {
     /// Wraps an internally allocated System Bytes `value`.
     pub(crate) const fn new(value: u32) -> Self {

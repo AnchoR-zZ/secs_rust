@@ -89,7 +89,44 @@ fn enter_selected(harness: &mut DriverHarness) {
     assert_eq!(harness.driver.state(), Some(SessionState::Selected));
 }
 
-/// Confirms public B1 intents map exactly and deferred Deselect is not accepted.
+/// T7 expires before ordinary input at equality even without a timer wakeup.
+#[test]
+fn t7_boundary_precedes_reader_and_queued_command() {
+    for reader in [false, true] {
+        let mut harness = DriverHarness::new();
+        assert!(harness.drive_one(HarnessInput::Connected));
+        let completion = harness.accept("queued", ControlIntent::Select);
+        harness
+            .clock
+            .set(MonoTime::from_elapsed(Duration::from_secs(10)));
+        let processed = if reader {
+            harness.driver.on_message(
+                ProtocolMessage::Control(ControlMessage::SelectRequest {
+                    session_id: u16::MAX,
+                    system_bytes: SystemBytes::new(8),
+                }),
+                harness.clock.now(),
+            )
+        } else {
+            harness.drive_one(HarnessInput::AcceptedCommand)
+        };
+        assert!(!processed);
+        assert!(harness.driver.writer().admitted().is_empty());
+        assert_eq!(
+            completion_result(&completion),
+            Err(OperationError::ConnectionLost)
+        );
+        assert_eq!(
+            harness.driver.close_reason(),
+            Some(GenerationCloseReason::CommunicationsTimeout(
+                crate::hsms::model::runtime::CommunicationsTimeoutKind::T7,
+            ))
+        );
+        assert_eq!(harness.driver.closer().count(), 1);
+    }
+}
+
+/// Public transactional control intents map to their implemented Core procedures.
 #[test]
 fn control_intents_map_without_expanding_the_b1_vocabulary() {
     type Driver = SessionDriver<
@@ -111,7 +148,10 @@ fn control_intents_map_without_expanding_the_b1_vocabulary() {
         Driver::core_command_kind(ControlIntent::Separate),
         Some(CoreCommandKind::Separate)
     );
-    assert_eq!(Driver::core_command_kind(ControlIntent::Deselect), None);
+    assert_eq!(
+        Driver::core_command_kind(ControlIntent::Deselect),
+        Some(CoreCommandKind::Deselect)
+    );
 }
 
 /// Confirms first connected publication is unique and repetition fails closed.
@@ -363,6 +403,12 @@ fn simultaneous_select_response_failure_completes_local_command_as_connection_lo
 
     assert!(harness.drive_one(HarnessInput::Reader));
 
+    assert!(receiver.try_recv().is_err());
+    let write_id = last_write_id(&harness);
+    assert!(harness.drive_one(HarnessInput::WriteOutcome {
+        write_id,
+        outcome: WriteOutcome::Committed
+    }));
     assert_eq!(
         completion_result(&receiver),
         Err(OperationError::ConnectionLost)
@@ -481,10 +527,9 @@ fn separate_preemption_completion_precedes_failed_admission() {
         .any(|event| matches!(event, TraceEvent::StateObserved(SessionState::NotSelected))));
 }
 
-/// Confirms a later terminal fault cannot replace LocalSeparate or clear its
-/// still-unsatisfied write barrier.
+/// A terminal fault preserves LocalSeparate as the reason but releases its barrier.
 #[test]
-fn later_fault_preserves_first_close_reason_and_separate_barrier() {
+fn later_fault_preserves_first_reason_and_releases_separate_barrier() {
     let mut harness = DriverHarness::new();
     assert!(harness.drive_one(HarnessInput::Connected));
     enter_selected(&mut harness);
@@ -497,17 +542,15 @@ fn later_fault_preserves_first_close_reason_and_separate_barrier() {
         harness.driver.close_reason(),
         Some(GenerationCloseReason::LocalSeparate)
     );
-    assert_eq!(harness.driver.closer().count(), 0);
-    assert_eq!(
-        completion_result(&receiver),
-        Err(OperationError::ConnectionLost)
-    );
+    assert_eq!(harness.driver.closer().count(), 1);
+    assert!(receiver.try_recv().is_err());
 
     assert!(harness.drive_one(HarnessInput::WriteOutcome {
         write_id: separate_write,
         outcome: WriteOutcome::Committed,
     }));
     assert_eq!(harness.driver.closer().count(), 1);
+    assert_eq!(completion_result(&receiver), Ok(()));
     assert_eq!(
         harness.driver.close_reason(),
         Some(GenerationCloseReason::LocalSeparate)
@@ -727,6 +770,8 @@ fn receiver_drop_and_mixed_drain_preserve_exactly_once_completion() {
 
     assert!(harness.drive_one(HarnessInput::Shutdown(GenerationCloseReason::TransportLost,)));
 
+    assert_eq!(harness.driver.pending_completion_count(), 1);
+    harness.driver.on_writer_stopped(harness.clock.now());
     assert_eq!(harness.driver.pending_completion_count(), 0);
     assert_eq!(harness.driver.queued_command_count(), 0);
     assert_eq!(
@@ -742,14 +787,14 @@ fn receiver_drop_and_mixed_drain_preserve_exactly_once_completion() {
     assert_eq!(completions.len(), 2);
     assert!(matches!(
         completions[0],
-        TraceEvent::CommandCompleted { label: "table", .. }
-    ));
-    assert!(matches!(
-        completions[1],
         TraceEvent::CommandCompleted {
             label: "queued",
             ..
         }
+    ));
+    assert!(matches!(
+        completions[1],
+        TraceEvent::CommandCompleted { label: "table", .. }
     ));
 }
 
@@ -771,9 +816,11 @@ fn command_id_exhaustion_never_wraps_and_drains_every_command_once() {
         completion_result(&exhausted),
         Err(OperationError::ConnectionLost)
     );
+    assert!(maximum.try_recv().is_err());
+    harness.driver.on_writer_stopped(harness.clock.now());
     assert_eq!(
         completion_result(&maximum),
-        Err(OperationError::ConnectionLost)
+        Err(OperationError::DeliveryIndeterminate)
     );
     assert_eq!(
         harness.driver.close_reason(),
@@ -849,7 +896,10 @@ fn fake_clock_proves_equal_and_backwards_time_behavior_without_sleeping() {
         .clock
         .set(MonoTime::from_elapsed(Duration::from_secs(2)));
     assert!(harness.drive_one(HarnessInput::Connected));
-    assert_eq!(harness.driver.next_deadline(), None);
+    assert_eq!(
+        harness.driver.next_deadline(),
+        Some(MonoTime::from_elapsed(Duration::from_secs(12)))
+    );
     assert!(harness.drive_one(HarnessInput::AdvanceTime));
     harness
         .clock

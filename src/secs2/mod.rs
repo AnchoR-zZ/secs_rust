@@ -8,7 +8,9 @@ pub mod codec;
 mod error;
 mod item;
 mod limits;
+mod message;
 
 pub use error::SecsItemError;
 pub use item::{AsciiString, LocalizedEncodingCode, LocalizedString, SecsItem};
 pub use limits::{DecodeLimits, MAX_DECODE_NESTING_DEPTH, MAX_ENCODED_ITEM_LENGTH};
+pub use message::{Function, PrimaryMessage, Stream, StreamError};

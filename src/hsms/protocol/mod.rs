@@ -4,8 +4,7 @@
 //! They contain no sockets, buffers, tasks, channels, or codec implementation
 //! details, so higher layers do not need to depend on a concrete profile.
 
-#![allow(dead_code)]
-
 pub(crate) mod header;
+#[cfg(any(feature = "runtime-tokio", test))]
 pub(crate) mod message;
 pub(crate) mod violation;

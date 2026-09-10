@@ -6,10 +6,12 @@
 
 use std::{fmt, num::NonZeroU8};
 
+#[cfg(any(feature = "runtime-tokio", test))]
 use crate::hsms::model::ids::{Function, SessionId, Stream, SystemBytes};
 
 /// Structurally valid HSMS Data-message header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "runtime-tokio", test))]
 pub(crate) struct DataHeader {
     /// Validated Data-message Session ID.
     session_id: SessionId,
@@ -23,6 +25,7 @@ pub(crate) struct DataHeader {
     system_bytes: SystemBytes,
 }
 
+#[cfg(any(feature = "runtime-tokio", test))]
 impl DataHeader {
     /// Creates a validated semantic Data header from its typed fields.
     ///
@@ -73,11 +76,13 @@ impl DataHeader {
 
 /// Raw E37 `Select.rsp` status byte with convenience success semantics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "runtime-tokio", test))]
 pub(crate) struct SelectStatus(
     /// Exact response status byte received from or sent to the peer.
     u8,
 );
 
+#[cfg(any(feature = "runtime-tokio", test))]
 impl SelectStatus {
     /// E37 status 0: selection completed successfully.
     pub(crate) const SUCCESS: Self = Self(0);
@@ -86,6 +91,7 @@ impl SelectStatus {
     /// E37 status 2: the HSMS entity is not ready for selection.
     pub(crate) const NOT_READY: Self = Self(2);
     /// E37 status 3: the HSMS entity has exhausted its connection resources.
+    #[cfg(test)]
     pub(crate) const EXHAUSTED: Self = Self(3);
 
     /// Wraps the exact `Select.rsp` status byte without discarding
@@ -108,6 +114,7 @@ impl SelectStatus {
     ///
     /// A `false` result does not make the raw status invalid: subsidiary
     /// standards and local implementations may define additional values.
+    #[cfg(test)]
     pub(crate) const fn is_base_standard(self) -> bool {
         self.0 <= Self::EXHAUSTED.0
     }
@@ -115,11 +122,13 @@ impl SelectStatus {
 
 /// Raw E37 `Deselect.rsp` status byte with convenience success semantics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "runtime-tokio", test))]
 pub(crate) struct DeselectStatus(
     /// Exact response status byte received from or sent to the peer.
     u8,
 );
 
+#[cfg(any(feature = "runtime-tokio", test))]
 impl DeselectStatus {
     /// E37 status 0: deselection completed successfully.
     pub(crate) const SUCCESS: Self = Self(0);
@@ -148,6 +157,7 @@ impl DeselectStatus {
     ///
     /// A `false` result preserves a potentially subsidiary-standard or local
     /// status for higher-level policy and diagnostics.
+    #[cfg(test)]
     pub(crate) const fn is_base_standard(self) -> bool {
         self.0 <= Self::BUSY.0
     }
@@ -218,6 +228,7 @@ impl fmt::Display for RejectReason {
 /// that belong to that control form. This prevents stale raw bytes from
 /// disagreeing with a separately stored control classification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(any(feature = "runtime-tokio", test))]
 pub(crate) enum ControlMessage {
     /// `Select.req` selection request.
     SelectRequest {
@@ -282,22 +293,6 @@ pub(crate) enum ControlMessage {
         /// System Bytes carried by the separation message.
         system_bytes: SystemBytes,
     },
-}
-
-impl ControlMessage {
-    /// Returns the System Bytes carried by any control-message variant.
-    pub(crate) const fn system_bytes(self) -> SystemBytes {
-        match self {
-            Self::SelectRequest { system_bytes, .. }
-            | Self::SelectResponse { system_bytes, .. }
-            | Self::DeselectRequest { system_bytes, .. }
-            | Self::DeselectResponse { system_bytes, .. }
-            | Self::LinktestRequest { system_bytes }
-            | Self::LinktestResponse { system_bytes }
-            | Self::RejectRequest { system_bytes, .. }
-            | Self::SeparateRequest { system_bytes, .. } => system_bytes,
-        }
-    }
 }
 
 #[cfg(test)]

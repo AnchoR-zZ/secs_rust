@@ -18,8 +18,8 @@
 use super::error::{ParseError, SourcePos};
 use super::message::SmlMessage;
 use super::scanner::{Scanner, Token, TokenKind};
-use crate::hsms::{Function, Stream};
 use crate::secs2::{AsciiString, DecodeLimits, SecsItem};
+use crate::secs2::{Function, Stream};
 
 /// Largest HSMS stream number representable in the seven header bits.
 const MAX_STREAM: u64 = 127;

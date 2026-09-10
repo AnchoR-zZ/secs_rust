@@ -38,6 +38,8 @@ impl MonoTime {
 /// Stable runtime-neutral category for one terminal transport failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransportFaultKind {
+    /// A nonempty write returned zero bytes and cannot make further progress.
+    WriteZero,
     /// The peer or network reset the current connection.
     ConnectionReset,
     /// The transport could no longer write to the peer.
@@ -66,6 +68,7 @@ impl TransportFault {
     }
 
     /// Returns this fault's stable runtime-neutral category.
+    #[cfg(test)]
     pub(crate) const fn kind(&self) -> TransportFaultKind {
         self.kind
     }
@@ -113,6 +116,8 @@ pub(crate) enum GenerationCloseReason {
     ControlBackpressure,
     /// An application-facing bounded resource exhausted its capacity.
     ApplicationBackpressure,
+    /// All System Bytes were used; Supervisor should rotate this generation.
+    SystemBytesExhausted,
     /// A non-recoverable local runtime or ownership invariant failed.
     RuntimeInvariant,
     /// An HSMS communications timer expired.

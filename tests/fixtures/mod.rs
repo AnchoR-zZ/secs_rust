@@ -38,7 +38,7 @@ pub const SECS2_ASCII_ABC: &[u8] = &[(0o20 << 2) | 1, 0x03, b'A', b'B', b'C'];
 ///
 /// Format byte `(0o32 << 2) | 1 == 0x69` (I2 + one length byte), length
 /// `0x06`, body six bytes. The numeric values of x, y and z are
-/// vendor-specific in the standard; this fixture uses `0x0102, 0x0304,
+/// unspecified placeholders in the standard; this fixture uses `0x0102, 0x0304,
 /// 0x0506` so the round-trip can be asserted.
 pub const SECS2_I2_THREE_VALUES: &[u8] = &[
     (0o32 << 2) | 1,
@@ -55,7 +55,8 @@ pub const SECS2_I2_THREE_VALUES: &[u8] = &[
 ///
 /// Format byte `(0o44 << 2) | 1 == 0x91` (F4 + one length byte), length
 /// `0x04`, body four bytes holding the big-endian bit pattern for `1.0f32`
-/// (`0x3F800000`).
+/// (`0x3F800000`). The standard leaves the float payload unspecified; 1.0 is
+/// this fixture's chosen value, not a numeric value printed in example d.
 pub const SECS2_F4_ONE: &[u8] = &[(0o44 << 2) | 1, 0x04, 0x3F, 0x80, 0x00, 0x00];
 
 /// Localized Character String (Format Code `22`, octal) carrying the UTF-8

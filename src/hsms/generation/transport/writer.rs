@@ -6,8 +6,6 @@
 //! from the Writer's single generation-local wire order; actual I/O and later
 //! asynchronous write outcomes remain outside this seam.
 
-#![allow(dead_code)]
-
 use crate::hsms::{
     model::ids::{WireSequence, WriteId},
     protocol::message::ProtocolMessage,
@@ -29,6 +27,7 @@ impl OutboundFrame {
     }
 
     /// Returns the Core-assigned write identity for outcome correlation.
+    #[cfg(test)]
     pub(crate) const fn write_id(&self) -> WriteId {
         self.write_id
     }
@@ -88,6 +87,19 @@ pub(crate) trait WriterIngress {
     /// and must be consumed by [`Self::admit_reserved_data`] or retired by
     /// [`Self::release_data`] exactly once.
     type DataPermit;
+
+    /// Prepares immutable Message Text and reserves its complete byte budget.
+    /// Runtime Writers override this before Core consumes protocol identifiers;
+    /// deterministic capacity-only ports may use the slot-only default.
+    fn try_reserve_message(
+        &mut self,
+        _body: Option<&crate::secs2::SecsItem>,
+    ) -> Result<Self::DataPermit, crate::hsms::OperationError> {
+        self.try_reserve_data().map_err(|error| match error {
+            DataReserveError::Full => crate::hsms::OperationError::Backpressure,
+            DataReserveError::Closed => crate::hsms::OperationError::ConnectionLost,
+        })
+    }
 
     /// Attempts to reserve one Data-lane slot before the Driver enters the Core.
     ///

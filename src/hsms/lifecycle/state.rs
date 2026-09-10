@@ -1,9 +1,11 @@
 //! Immutable endpoint and session state exposed to application observers.
 //!
-//! The future `LifecycleCell` owns mutation and linearization. This file only
-//! defines copyable snapshots and state vocabulary shared across boundaries.
+//! Endpoint runtime publishes coherent snapshots after serialized Driver rounds.
+//! This module defines copyable snapshots and shared lifecycle vocabulary.
 
-use crate::hsms::{model::ids::LifecycleSequence, ConnectionGeneration};
+#[cfg(feature = "runtime-tokio")]
+use crate::hsms::model::ids::LifecycleSequence;
+use crate::hsms::ConnectionGeneration;
 
 /// What the caller wants the long-lived endpoint to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,10 +55,55 @@ pub enum SessionState {
     Closed,
 }
 
+/// Public report for the most recent connection exit and cleanup attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConnectionExitReport {
+    /// TCP generation associated with this exit and cleanup attempt.
+    generation: ConnectionGeneration,
+    /// Public close classification recorded for that generation.
+    reason: crate::hsms::ConnectionCloseReason,
+    /// Whether cleanup proved that every generation resource was released.
+    clean: bool,
+}
+
+impl ConnectionExitReport {
+    /// Creates an exit report with the outcome of its latest cleanup attempt.
+    #[cfg(feature = "runtime-tokio")]
+    pub(crate) const fn new(
+        generation: ConnectionGeneration,
+        reason: crate::hsms::ConnectionCloseReason,
+        clean: bool,
+    ) -> Self {
+        Self {
+            generation,
+            reason,
+            clean,
+        }
+    }
+
+    /// Returns the connection generation associated with the report.
+    #[must_use]
+    pub const fn generation(self) -> ConnectionGeneration {
+        self.generation
+    }
+
+    /// Returns the public close classification for the generation.
+    #[must_use]
+    pub const fn reason(self) -> crate::hsms::ConnectionCloseReason {
+        self.reason
+    }
+
+    /// Returns whether cleanup proved that all generation resources were released.
+    #[must_use]
+    pub const fn clean(self) -> bool {
+        self.clean
+    }
+}
+
 /// Read-only endpoint lifecycle state published to applications.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EndpointStateSnapshot {
-    /// Latest application running intent committed by `LifecycleCell`.
+    /// Latest application running intent committed by the endpoint runtime.
     desired: RunningIntent,
     /// Coarse lifecycle phase committed at the same sequence.
     phase: EndpointPhase,
@@ -66,6 +113,8 @@ pub struct EndpointStateSnapshot {
     sequence: u64,
     /// Selection state of the current generation, if one exists.
     session: Option<SessionState>,
+    /// Most recent exit/cleanup report, retained even when cleanup is unproven.
+    last_exit: Option<ConnectionExitReport>,
 }
 
 impl EndpointStateSnapshot {
@@ -78,14 +127,15 @@ impl EndpointStateSnapshot {
             generation: GenerationSlotSnapshot::None,
             sequence: 0,
             session: None,
+            last_exit: None,
         }
     }
 
-    #[allow(dead_code)]
     /// Builds a snapshot from one atomically observed lifecycle revision.
     ///
     /// `desired`, `phase`, `generation`, and `session` must all describe the
-    /// state committed at `sequence`; only `LifecycleCell` may call this helper.
+    /// state committed at `sequence`; only the endpoint runtime may call this helper.
+    #[cfg(feature = "runtime-tokio")]
     pub(crate) const fn new(
         desired: RunningIntent,
         phase: EndpointPhase,
@@ -99,7 +149,21 @@ impl EndpointStateSnapshot {
             generation,
             sequence: sequence.get(),
             session,
+            last_exit: None,
         }
+    }
+
+    /// Returns a copy of the most recent exit/cleanup report, if any.
+    #[must_use]
+    pub const fn last_exit(self) -> Option<ConnectionExitReport> {
+        self.last_exit
+    }
+
+    /// Returns this snapshot with the most recent exit/cleanup report.
+    #[cfg(feature = "runtime-tokio")]
+    pub(crate) const fn with_last_exit(mut self, value: Option<ConnectionExitReport>) -> Self {
+        self.last_exit = value;
+        self
     }
 
     #[must_use]

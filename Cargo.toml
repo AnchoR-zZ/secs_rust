@@ -4,10 +4,23 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Greenfield HSMS-SS and SECS-II protocol library"
+include = ["/src/**", "/tests/**", "/examples/**", "/Cargo.toml", "/LICENSE", "/README.md", "/USAGE.md", "/ARCHITECTURE.md", "/ACCEPTANCE.md", "/STANDARD_TRACE.md"]
+
+[features]
+default = ["runtime-tokio"]
+runtime-tokio = ["dep:tokio"]
 
 [dependencies]
 bytes = "1"
 thiserror = "2.0.18"
+tokio = { version = "1.50", optional = true, features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { version = "1.50", features = ["test-util"] }
 
 [lints.rust]
 unsafe_code = "forbid"
+
+[[example]]
+name = "loopback"
+required-features = ["runtime-tokio"]

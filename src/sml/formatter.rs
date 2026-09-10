@@ -506,10 +506,10 @@ mod tests {
     //! two layout styles, message assembly, and every validation refusal.
 
     use super::*;
-    use crate::hsms::{Function, Stream};
     use crate::secs2::codec::header::FormatCode;
     use crate::secs2::codec::EncodeError;
     use crate::secs2::{AsciiString, LocalizedEncodingCode, LocalizedString};
+    use crate::secs2::{Function, Stream};
 
     /// Formats `item` in Compact style, failing the test on validation errors.
     fn compact(item: &SecsItem) -> String {

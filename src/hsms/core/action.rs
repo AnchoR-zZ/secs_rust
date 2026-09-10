@@ -1,4 +1,4 @@
-//! Ordered effects emitted by the future deterministic Session Core.
+//! Ordered effects emitted by the deterministic Session Core.
 //!
 //! Core commits its internal state before returning one owned `CoreActions`
 //! batch. The Driver then consumes that batch in order to admit frames, publish
@@ -7,10 +7,10 @@
 use crate::hsms::{
     lifecycle::SessionState,
     model::{
-        ids::{CommandId, WriteId},
+        ids::{CommandId, ReplyCapabilityId, WriteId},
         runtime::{CloseBarrier, GenerationCloseReason},
     },
-    protocol::message::ProtocolMessage,
+    protocol::message::{DataMessage, ProtocolMessage},
 };
 
 use super::command::CoreCommandResult;
@@ -18,6 +18,13 @@ use super::command::CoreCommandResult;
 /// One ordered action emitted by Session Core for Driver application.
 #[derive(Debug, PartialEq)]
 pub(crate) enum CoreAction {
+    /// Delivers a classified Primary and optional single-use reply authority.
+    DeliverPrimary {
+        /// Validated header and owned decoded application content.
+        message: DataMessage,
+        /// Registered capability for W=1; absent for W=0.
+        capability: Option<ReplyCapabilityId>,
+    },
     /// Synchronously offers one complete semantic frame to Writer ingress.
     SendFrame {
         /// Core-assigned identity used to correlate the later write outcome.
@@ -65,6 +72,7 @@ impl CoreActions {
     }
 
     /// Consumes this batch and returns its ordered action storage.
+    #[cfg(test)]
     pub(crate) fn into_actions(self) -> Vec<CoreAction> {
         self.0
     }

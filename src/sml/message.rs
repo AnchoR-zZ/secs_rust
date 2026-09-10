@@ -6,8 +6,8 @@
 //! session layer. Converting a message into an HSMS primary/secondary
 //! operation stays the responsibility of the future HSMS send API.
 
-use crate::hsms::{Function, Stream};
 use crate::secs2::SecsItem;
+use crate::secs2::{Function, Stream};
 
 /// Complete parsed form of one SML message: `SxFy`, optional W-Bit, and an
 /// optional single root item as the Message Text.

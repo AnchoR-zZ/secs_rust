@@ -39,6 +39,26 @@ fn round_trip(item: &SecsItem) -> SecsItem {
 // E5 §6.5 fixed example vectors
 // ---------------------------------------------------------------------------
 
+/// Encodes independently constructed values against the printed example layouts.
+/// The c/d payloads instantiate the standard's unspecified integer/float fields.
+#[test]
+fn standard_example_layouts_encode_to_independent_vectors() {
+    for (item, expected) in [
+        (SecsItem::Binary(vec![0xAA]), fixtures::SECS2_BINARY_AA),
+        (
+            SecsItem::Ascii(AsciiString::new("ABC").unwrap()),
+            fixtures::SECS2_ASCII_ABC,
+        ),
+        (
+            SecsItem::I2(vec![0x0102, 0x0304, 0x0506]),
+            fixtures::SECS2_I2_THREE_VALUES,
+        ),
+        (SecsItem::F4(vec![1.0]), fixtures::SECS2_F4_ONE),
+    ] {
+        assert_eq!(encode_to_vec(&item).unwrap(), expected);
+    }
+}
+
 /// Verifies decoding of E5 §6.5 example a as one Binary octet.
 #[test]
 fn example_a_single_binary_octet_decodes_to_the_expected_value() {

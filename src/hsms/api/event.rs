@@ -1,23 +1,20 @@
-//! Public endpoint events and their monotonically ordered envelope.
-//!
-//! Events expose stable application semantics while keeping raw correlation
-//! headers and runtime implementation details inside the endpoint.
+//! Public connection-close causes and safe protocol diagnostic classifications.
+//! Primary delivery, latest-state subscriptions and diagnostic records use their
+//! separate endpoint channels rather than a shared generic event envelope.
 
-// Internal constructors become production-reachable with SessionDriver/EventPort.
-#![allow(dead_code)]
-
-use crate::hsms::{
-    error::ProtocolError,
-    lifecycle::EndpointStateSnapshot,
-    model::ids::{ConnectionGeneration, EventSequence},
-    protocol::header::RejectReason,
-};
-
-use super::InboundPrimary;
+use crate::hsms::{error::ProtocolError, protocol::header::RejectReason};
 
 /// Public reason for an open connection generation ending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionCloseReason {
+    /// A protocol communications timer expired and ended the connection.
+    CommunicationsTimeout(crate::hsms::TimeoutKind),
+    /// Reserved control-write capacity could not admit a required response.
+    ControlBackpressure,
+    /// The generation consumed its System Bytes namespace and must rotate.
+    SystemBytesExhausted,
+    /// A runtime invariant failed and automatic recovery was stopped.
+    RuntimeInvariant,
     /// The application stopped the logical endpoint.
     LocalStop,
     /// The application requested replacement of the current connection.
@@ -38,9 +35,11 @@ pub enum ConnectionCloseReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PeerRejectDisposition {
-    /// A uniquely attributed live application operation was failed.
+    /// A uniquely attributed command-backed operation was failed. This includes
+    /// runtime-initiated Select, which uses the same command path as public control.
     OperationRejected,
-    /// A uniquely attributed autonomous protocol operation was retired.
+    /// A uniquely attributed Core-owned operation without a command completion
+    /// was retired, such as the idle Linktest probe.
     AutonomousRejected,
     /// No retained outbound candidate matched the peer reference.
     Unknown,
@@ -67,6 +66,7 @@ pub struct PeerRejectNotice {
 
 impl PeerRejectNotice {
     /// Creates a peer-rejection notice from its reason and safe attribution.
+    #[cfg(any(feature = "runtime-tokio", test))]
     pub(crate) const fn new(reason: RejectReason, disposition: PeerRejectDisposition) -> Self {
         Self {
             reason,
@@ -91,79 +91,16 @@ impl PeerRejectNotice {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ProtocolNotice {
+    /// A live transaction was found but the Secondary violated its response contract.
+    SecondaryMismatch,
+    /// No live or retained transaction matched an incoming Secondary.
+    UnmatchedSecondary,
     /// Diagnostic description of a protocol violation seen by the Core.
     Violation(ProtocolError),
     /// Structured result of attributing one peer `Reject.req`.
     PeerReject(PeerRejectNotice),
     /// A late event from an obsolete or terminal transaction was ignored.
     StaleEventIgnored,
-}
-
-/// Reliable event published to the endpoint consumer.
-#[derive(Debug)]
-pub enum EndpointEvent {
-    /// The externally observable lifecycle snapshot changed.
-    StateChanged(EndpointStateSnapshot),
-    /// The Core classified and decoded an inbound Primary Data message.
-    Primary(InboundPrimary),
-    /// One concrete TCP generation ended.
-    ConnectionClosed {
-        /// Generation that ended; it may already have been replaced.
-        generation: ConnectionGeneration,
-        /// Stable public reason for the close.
-        reason: ConnectionCloseReason,
-    },
-    /// Non-data protocol diagnostic that does not complete a command.
-    ProtocolNotice(ProtocolNotice),
-}
-
-/// Monotonic endpoint event envelope.
-#[derive(Debug)]
-pub struct EndpointEventEnvelope {
-    /// Endpoint-wide monotonic publication sequence.
-    sequence: u64,
-    /// Originating TCP incarnation, or `None` for endpoint-only events.
-    generation: Option<ConnectionGeneration>,
-    /// Reliable application event payload.
-    event: EndpointEvent,
-}
-
-impl EndpointEventEnvelope {
-    /// Wraps an event with its publication order and optional generation.
-    pub(crate) const fn new(
-        sequence: EventSequence,
-        generation: Option<ConnectionGeneration>,
-        event: EndpointEvent,
-    ) -> Self {
-        Self {
-            sequence: sequence.get(),
-            generation,
-            event,
-        }
-    }
-
-    /// Returns the endpoint-wide publication sequence.
-    #[must_use]
-    pub const fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    /// Returns the originating TCP generation, when applicable.
-    #[must_use]
-    pub const fn generation(&self) -> Option<ConnectionGeneration> {
-        self.generation
-    }
-
-    /// Borrows the reliable endpoint event payload.
-    #[must_use]
-    pub const fn event(&self) -> &EndpointEvent {
-        &self.event
-    }
-
-    /// Consumes the envelope and returns its event payload.
-    pub fn into_event(self) -> EndpointEvent {
-        self.event
-    }
 }
 
 #[cfg(test)]

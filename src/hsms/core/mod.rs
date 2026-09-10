@@ -1,10 +1,8 @@
 //! Runtime-neutral Session Core with owned commands and ordered actions.
 //!
-//! This module implements deterministic B1 control and minimal B2 Data behavior
+//! This module owns selection, transactions, reply capabilities and deadlines
 //! behind the values exchanged with `SessionDriver`. It deliberately contains
 //! no runtime, transport, channel, socket, or clock implementation.
-
-#![allow(dead_code, unused_imports)]
 
 mod action;
 mod command;

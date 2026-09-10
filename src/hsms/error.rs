@@ -19,17 +19,20 @@ pub enum IdentifierError {
     #[error("HSMS session id 0xFFFF is reserved for control messages")]
     ReservedControlSession,
 
-    /// A stream value exceeded the seven bits available beside the W-bit.
-    #[error("SECS stream {value} is outside the seven-bit range 0..=127")]
-    StreamOutOfRange {
-        /// Supplied stream value.
-        value: u8,
-    },
+    /// A transport-independent stream identifier was invalid.
+    #[error(transparent)]
+    InvalidStream(#[from] crate::secs2::StreamError),
 }
 
 /// Invalid endpoint configuration.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
+    /// Runtime resource or deadline policy cannot be represented safely.
+    #[error("invalid runtime policy: {description}")]
+    RuntimePolicy {
+        /// Stable explanation returned before allocating runtime resources.
+        description: &'static str,
+    },
     /// A mandatory or enabled timer was configured with zero duration.
     #[error("duration `{field}` must be greater than zero")]
     ZeroDuration {
@@ -66,6 +69,8 @@ pub enum ConfigError {
 /// Timer kinds visible at the protocol and endpoint boundaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TimeoutKind {
+    /// Finite local drain interval elapsed before a control request was sent.
+    Drain,
     /// TCP connection-attempt timeout.
     Connect,
     /// Data-message reply timeout.
@@ -112,6 +117,12 @@ pub enum ProtocolError {
 /// Failure returned by a typed endpoint operation.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum OperationError {
+    /// T3 expired after this original Primary committed to the local transport.
+    #[error("HSMS T3 request timeout")]
+    RequestTimeout {
+        /// Original outbound header and connection generation for S9/MHEAD use.
+        context: crate::hsms::MessageContext,
+    },
     /// The logical endpoint has not been started.
     #[error("HSMS endpoint is not running")]
     NotRunning,
@@ -200,6 +211,21 @@ pub enum OperationError {
     /// The owning endpoint runtime is no longer executing.
     #[error("HSMS runtime has stopped")]
     RuntimeStopped,
+
+    /// Local Message Text could not be represented by the SECS-II encoder.
+    #[error("invalid outbound SECS-II content: {0}")]
+    Encode(#[from] crate::secs2::codec::EncodeError),
+
+    /// Message Text exceeds the endpoint's configured HSMS representation bound.
+    #[error(
+        "outbound Message Text length {text_length} exceeds HSMS maximum {maximum_message_length}"
+    )]
+    OutboundFrameTooLarge {
+        /// Measured Message Text bytes, excluding header and prefix.
+        text_length: usize,
+        /// Maximum permitted Message Length, including its ten-byte header.
+        maximum_message_length: usize,
+    },
 
     /// A protocol decision prevented successful completion.
     #[error(transparent)]

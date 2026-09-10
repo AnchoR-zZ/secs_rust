@@ -12,7 +12,6 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     },
-    time::Duration,
 };
 
 use crate::hsms::{
@@ -44,6 +43,15 @@ static NEXT_FAKE_WRITER_ID: AtomicU64 = AtomicU64::new(1);
 /// One cross-component event retained in deterministic Driver execution order.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum TraceEvent {
+    /// Reply failed before Core and returned its exclusive inputs to the caller.
+    ReplyRejected {
+        /// Stable completion label used for order assertions.
+        label: &'static str,
+        /// Attempted reply operation without token identity or body contents.
+        intent: crate::hsms::ReplyIntent,
+        /// Exact pre-Core failure category.
+        error: OperationError,
+    },
     /// Fake Writer reserved one Data-lane slot before Core execution.
     DataPermitReserved {
         /// Fake-local reservation identity used to prove unique retirement.
@@ -222,11 +230,6 @@ pub(super) struct FakeWriter {
 }
 
 impl FakeWriter {
-    /// Creates an empty Writer whose first successful sequence is zero.
-    pub(super) fn new(trace: SharedTrace) -> Self {
-        Self::with_capacities(trace, 1_024, 1_024)
-    }
-
     /// Creates an empty Writer with independently bounded Control and Data lanes.
     pub(super) fn with_capacities(
         trace: SharedTrace,
@@ -480,8 +483,6 @@ impl WriterIngress for FakeWriter {
 pub(super) enum FakeReaderInput {
     /// One complete semantic message requiring no byte framing.
     Message(ProtocolMessage),
-    /// One terminal generation failure passed to Core shutdown.
-    TerminalFault(GenerationCloseReason),
 }
 
 /// FIFO Reader fake that never parses bytes or owns protocol state.
@@ -495,12 +496,6 @@ impl FakeReader {
     /// Queues one complete semantic peer message.
     pub(super) fn push_message(&mut self, message: ProtocolMessage) {
         self.inputs.push_back(FakeReaderInput::Message(message));
-    }
-
-    /// Queues one terminal generation failure.
-    pub(super) fn push_terminal_fault(&mut self, reason: GenerationCloseReason) {
-        self.inputs
-            .push_back(FakeReaderInput::TerminalFault(reason));
     }
 
     /// Removes the oldest queued Reader input.
@@ -556,14 +551,6 @@ impl FakeClock {
     pub(super) fn set(&mut self, now: MonoTime) {
         self.now = now;
     }
-
-    /// Advances logical time with checked arithmetic.
-    pub(super) fn advance(&mut self, duration: Duration) {
-        self.now = self
-            .now
-            .checked_add(duration)
-            .expect("fake clock advance must not overflow");
-    }
 }
 
 /// Completion endpoint backed by a test receiver and shared trace.
@@ -599,6 +586,28 @@ impl CommandCompletion for FakeCompletion {
     /// Records and attempts the unique completion; a dropped receiver is benign.
     fn complete(self, result: DriverCommandResult) {
         let event = match &result {
+            DriverCommandResult::PrimaryRejected {
+                reply_expected,
+                error,
+                ..
+            } => {
+                if *reply_expected {
+                    TraceEvent::RequestCommandCompleted {
+                        label: self.label,
+                        result: Err(error.clone()),
+                    }
+                } else {
+                    TraceEvent::SendCommandCompleted {
+                        label: self.label,
+                        result: Err(error.clone()),
+                    }
+                }
+            }
+            DriverCommandResult::ReplyRejected { intent, error, .. } => TraceEvent::ReplyRejected {
+                label: self.label,
+                intent: *intent,
+                error: error.clone(),
+            },
             DriverCommandResult::Control(control_result) => TraceEvent::CommandCompleted {
                 label: self.label,
                 result: control_result.clone(),
@@ -798,10 +807,6 @@ impl DriverHarness {
                         }
                     }
                     self.driver.on_message(message, now)
-                }
-                Some(FakeReaderInput::TerminalFault(reason)) => {
-                    self.driver.on_shutdown(reason, None, now);
-                    true
                 }
                 None => false,
             },

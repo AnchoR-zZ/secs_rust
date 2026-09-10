@@ -1,10 +1,8 @@
-//! Endpoint and session state snapshots.
-//!
-//! The mutable `LifecycleCell` is implemented in Wave 2A. Wave 0 freezes only
-//! the externally observable values and legal vocabulary.
+//! Endpoint and session state snapshots used by lifecycle publication.
 
 mod state;
 
 pub use state::{
-    EndpointPhase, EndpointStateSnapshot, GenerationSlotSnapshot, RunningIntent, SessionState,
+    ConnectionExitReport, EndpointPhase, EndpointStateSnapshot, GenerationSlotSnapshot,
+    RunningIntent, SessionState,
 };

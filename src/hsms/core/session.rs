@@ -1,4 +1,4 @@
-//! Deterministic HSMS Session Core for B1 control and minimal B2 Data traffic.
+//! Deterministic HSMS Session Core for B1 control and B2 Data traffic.
 //!
 //! This module owns selection state, control and Data transactions, bounded
 //! response tombstones, generation-local identifiers, and write correlation.
@@ -11,10 +11,11 @@ use std::{
 };
 
 use crate::hsms::{
+    config::HsmsTimeouts,
     error::{OperationError, ProtocolError},
     lifecycle::SessionState,
     model::{
-        ids::{CommandId, SessionId, SystemBytes, WriteId},
+        ids::{CommandId, ReplyCapabilityId, SessionId, SystemBytes, WriteId},
         runtime::{CloseBarrier, GenerationCloseReason, MonoTime, WriteOutcome},
     },
     protocol::{
@@ -22,6 +23,10 @@ use crate::hsms::{
         message::{DataMessage, ProtocolMessage},
     },
 };
+
+mod deselect;
+mod inbound;
+mod timing;
 
 use super::{
     transaction::{matches_data_reject, ResponseContract, ResponseMatch, TransactionTombstones},
@@ -53,21 +58,51 @@ pub(crate) struct SessionCoreConfig {
     transaction_capacity: usize,
     /// Maximum number of completed response contracts retained in FIFO order.
     tombstone_capacity: usize,
+    /// Protocol reply, control, selection and idle-probe timer policy.
+    timeouts: HsmsTimeouts,
+    /// Maximum live inbound W=1 response contracts retained by this generation.
+    reply_capacity: usize,
+    /// Absolute local Deselect drain bound, separate from the peer T6 timer.
+    drain_timeout: std::time::Duration,
 }
 
 impl SessionCoreConfig {
+    /// Copies every Core-owned timer and registry bound from endpoint policy.
+    pub(crate) fn from_endpoint(config: &crate::hsms::EndpointConfig) -> Self {
+        Self::new(config.session_id())
+            .with_timeouts(config.timeouts())
+            .with_transaction_capacity(config.limits().transaction_capacity())
+            .with_tombstone_capacity(config.limits().tombstone_capacity())
+            .with_reply_capacity(config.limits().reply_capability_capacity())
+            .with_drain_timeout(config.runtime().drain())
+    }
     /// Creates a Session Core configuration for the endpoint Data `session_id`.
-    pub(crate) const fn new(session_id: SessionId) -> Self {
+    pub(crate) fn new(session_id: SessionId) -> Self {
         Self {
             session_id,
             transaction_capacity: DEFAULT_TRANSACTION_CAPACITY,
             tombstone_capacity: DEFAULT_TOMBSTONE_CAPACITY,
+            timeouts: HsmsTimeouts::default(),
+            reply_capacity: 256,
+            drain_timeout: std::time::Duration::from_secs(5),
         }
     }
 
     /// Returns the configured Data Session ID without exposing control allocation.
     pub(crate) const fn session_id(self) -> SessionId {
         self.session_id
+    }
+
+    /// Sets the maximum live inbound reply contracts before fail-closed pressure.
+    pub(crate) const fn with_reply_capacity(mut self, capacity: usize) -> Self {
+        self.reply_capacity = capacity;
+        self
+    }
+
+    /// Sets the local drain interval used before sending Deselect.req.
+    pub(crate) const fn with_drain_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.drain_timeout = timeout;
+        self
     }
 
     /// Overrides the maximum number of concurrent outbound Data requests.
@@ -82,6 +117,12 @@ impl SessionCoreConfig {
         self
     }
 
+    /// Installs the validated protocol timer policy for this generation.
+    pub(crate) const fn with_timeouts(mut self, timeouts: HsmsTimeouts) -> Self {
+        self.timeouts = timeouts;
+        self
+    }
+
     /// Returns the configured concurrent outbound Data-request capacity.
     pub(crate) const fn transaction_capacity(self) -> usize {
         self.transaction_capacity
@@ -93,9 +134,11 @@ impl SessionCoreConfig {
     }
 }
 
-/// Transactional control request types supported by the B1 Core slice.
+/// Transactional control request types supported by Session Core.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TransactionKind {
+    /// Locally initiated Deselect awaiting its exact response or peer Reject.
+    Deselect,
     /// Locally initiated `Select.req` waiting for `Select.rsp` or peer Reject.
     Select,
     /// Locally initiated `Linktest.req` waiting for `Linktest.rsp` or peer Reject.
@@ -106,6 +149,7 @@ impl TransactionKind {
     /// Returns the request SType used to attribute an inbound peer Reject.
     const fn request_stype(self) -> u8 {
         match self {
+            Self::Deselect => 3,
             Self::Select => SELECT_REQUEST_STYPE,
             Self::Linktest => LINKTEST_REQUEST_STYPE,
         }
@@ -117,16 +161,16 @@ impl TransactionKind {
 struct ControlTransaction {
     /// Control procedure whose exact response type must match.
     kind: TransactionKind,
-    /// Driver-assigned command awaiting one terminal completion.
-    command_id: CommandId,
+    /// Application command, absent for an autonomous control procedure.
+    command_id: Option<CommandId>,
     /// Fixed or copied Control Session ID required by the matcher.
     session_id: u16,
     /// Core-assigned correlation value required by the matcher.
     system_bytes: SystemBytes,
     /// Core-assigned request write retained independently of transaction completion.
     write_id: WriteId,
-    /// Whether Writer has reported the request fully committed locally.
-    sent: bool,
+    /// Absolute T6 deadline, absent until the request commits locally.
+    deadline: Option<MonoTime>,
 }
 
 /// One live outbound Data request and its immutable response contract.
@@ -138,8 +182,8 @@ struct DataTransaction {
     write_id: WriteId,
     /// Full normal-Secondary and header-only F0 matching contract.
     response_contract: ResponseContract,
-    /// Whether Writer has reported that the request committed locally.
-    sent: bool,
+    /// Absolute T3 deadline, absent until the request commits locally.
+    deadline: Option<MonoTime>,
 }
 
 /// Correlation tuple used to attribute a peer Reject to an outbound Data write.
@@ -244,6 +288,8 @@ enum DataInputClassification {
 /// Internal Reject classification used by the B2 deterministic test seam.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RejectInputClassification {
+    /// An exact Reject retired one autonomous control procedure.
+    MatchedAutonomousOperation,
     /// One exact live control or Data operation consumed the Reject.
     MatchedLiveOperation,
     /// An exact Reject matched a retained completed Data request.
@@ -265,20 +311,36 @@ pub(crate) struct SessionCore {
     state: Option<SessionState>,
     /// Most recent monotonic logical time accepted from the Driver.
     last_now: Option<MonoTime>,
+    /// At most one non-semantic observation from the current inbound input round.
+    notice: Option<crate::hsms::ProtocolNotice>,
+    /// Absolute expiry of the current uninterrupted NotSelected tenure.
+    selection_deadline: Option<MonoTime>,
+    /// Latest input or local write activity, using the generation epoch.
+    last_activity: Option<MonoTime>,
+    /// Next idle-probe deadline, suppressed while a control transaction is open.
+    idle_deadline: Option<MonoTime>,
     /// Next WriteId raw value, or `None` after the non-wrapping space is exhausted.
     next_write_id: Option<u64>,
     /// Next System Bytes raw value, or `None` after the non-wrapping space is exhausted.
     next_system_bytes: Option<u32>,
     /// Sole locally initiated Select or Linktest transaction.
     active_transaction: Option<ControlTransaction>,
+    /// Pending local Deselect waiting for existing Data work to drain.
+    deselect_drain: Option<deselect::DeselectDrain>,
     /// Concurrent outbound Data requests keyed by their unique System Bytes.
     data_transactions: HashMap<SystemBytes, DataTransaction>,
     /// Bounded FIFO of completed response contracts for late-input isolation.
     tombstones: TransactionTombstones,
     /// Core-produced writes retained until admission failure or one terminal outcome.
     pending_writes: HashMap<WriteId, PendingWrite>,
+    /// Independent peer transaction contracts; outbound System Bytes may overlap.
+    reply_contracts: BTreeMap<ReplyCapabilityId, DataHeader>,
+    /// Next single-use capability identity, absent after checked exhaustion.
+    next_reply_id: Option<u64>,
     /// Accepted commands that have not yet emitted their unique completion action.
     open_commands: BTreeMap<CommandId, OpenCommandKind>,
+    /// Terminal protocol errors waiting for an unresolved write's visibility fact.
+    deferred_errors: BTreeMap<CommandId, OperationError>,
     /// Whether protocol work must be isolated while the generation closes.
     closing: bool,
     /// Whether Core has already returned a close action on a successfully applied path.
@@ -293,13 +355,21 @@ impl SessionCore {
             config,
             state: None,
             last_now: None,
+            notice: None,
+            selection_deadline: None,
+            last_activity: None,
+            idle_deadline: None,
             next_write_id: Some(0),
             next_system_bytes: Some(0),
             active_transaction: None,
+            deselect_drain: None,
             data_transactions: HashMap::new(),
             tombstones,
             pending_writes: HashMap::new(),
+            reply_contracts: BTreeMap::new(),
+            next_reply_id: Some(0),
             open_commands: BTreeMap::new(),
+            deferred_errors: BTreeMap::new(),
             closing: false,
             close_action_issued: false,
         }
@@ -311,11 +381,13 @@ impl SessionCore {
     }
 
     /// Returns the number of live outbound Data requests awaiting a response.
+    #[cfg(test)]
     pub(crate) fn pending_data_transaction_count(&self) -> usize {
         self.data_transactions.len()
     }
 
     /// Returns the number of retained completed Data response contracts.
+    #[cfg(test)]
     pub(crate) fn tombstone_count(&self) -> usize {
         self.tombstones.len()
     }
@@ -325,7 +397,13 @@ impl SessionCore {
         self.open_commands.len()
     }
 
+    /// Reports whether Core still owns settlement of `command_id`.
+    pub(crate) fn owns_command(&self, command_id: CommandId) -> bool {
+        self.open_commands.contains_key(&command_id)
+    }
+
     /// Returns the number of Core-produced writes awaiting a unique outcome.
+    #[cfg(test)]
     pub(crate) fn pending_write_count(&self) -> usize {
         self.pending_writes.len()
     }
@@ -359,6 +437,11 @@ impl SessionCore {
         }
 
         self.state = Some(SessionState::NotSelected);
+        self.arm_selection_timeout(now, &mut actions);
+        self.record_activity(now, &mut actions);
+        if self.closing {
+            return actions;
+        }
         actions.push(CoreAction::SessionStateChanged(SessionState::NotSelected));
         actions
     }
@@ -372,9 +455,10 @@ impl SessionCore {
         let mut actions = CoreActions::new();
         let (command_id, kind) = command.into_parts();
         let open_kind = match &kind {
-            CoreCommandKind::Select | CoreCommandKind::Linktest | CoreCommandKind::Separate => {
-                OpenCommandKind::Control
-            }
+            CoreCommandKind::Select
+            | CoreCommandKind::Deselect
+            | CoreCommandKind::Linktest
+            | CoreCommandKind::Separate => OpenCommandKind::Control,
             CoreCommandKind::Send(_) => OpenCommandKind::Send,
             CoreCommandKind::Request(_) => OpenCommandKind::Request,
         };
@@ -395,10 +479,25 @@ impl SessionCore {
             return actions;
         }
 
+        if self.deselect_drain.is_some()
+            && matches!(
+                kind,
+                CoreCommandKind::Select | CoreCommandKind::Deselect | CoreCommandKind::Linktest
+            )
+        {
+            self.complete_error(command_id, OperationError::ControlBusy, &mut actions);
+            return actions;
+        }
+
         match kind {
+            CoreCommandKind::Deselect => self.start_deselect(command_id, now, &mut actions),
             CoreCommandKind::Select => self.start_select(command_id, &mut actions),
             CoreCommandKind::Linktest => self.start_linktest(command_id, &mut actions),
-            CoreCommandKind::Separate => self.start_separate(command_id, &mut actions),
+            CoreCommandKind::Separate => self.start_separate(
+                Some(command_id),
+                GenerationCloseReason::LocalSeparate,
+                &mut actions,
+            ),
             CoreCommandKind::Send(primary) => {
                 self.start_data(command_id, primary, false, &mut actions);
             }
@@ -411,15 +510,21 @@ impl SessionCore {
 
     /// Applies one structurally validated semantic peer message at logical time `now`.
     ///
-    /// B2 classifies Data only as a live response, retained tombstone, or
-    /// trace-only unmatched input. Inbound Primary publication remains outside
-    /// this slice, while B1 control behavior is preserved.
+    /// B2 matches Data against live responses and retained tombstones, or
+    /// delivers inbound Primaries with their optional reply authority. B1
+    /// control messages retain their state and transaction handling here.
     pub(crate) fn on_message(&mut self, message: ProtocolMessage, now: MonoTime) -> CoreActions {
+        self.notice = None;
         let mut actions = CoreActions::new();
         if !self.accept_time(now, &mut actions) {
             return actions;
         }
         if self.state.is_none() || self.closing {
+            return actions;
+        }
+
+        self.record_activity(now, &mut actions);
+        if self.closing {
             return actions;
         }
 
@@ -448,27 +553,53 @@ impl SessionCore {
                 reason,
                 system_bytes,
             }) => {
-                // The private classification is observable in Core tests;
-                // public diagnostics and application delivery remain deferred.
-                let _classification = self.receive_reject(
+                let classification = self.receive_reject(
                     session_id,
                     header_byte_2,
                     reason,
                     system_bytes,
                     &mut actions,
                 );
+                use crate::hsms::{
+                    PeerRejectDisposition as Disposition, PeerRejectNotice, ProtocolNotice,
+                };
+                let disposition = match classification {
+                    RejectInputClassification::MatchedLiveOperation => {
+                        Disposition::OperationRejected
+                    }
+                    RejectInputClassification::MatchedAutonomousOperation => {
+                        Disposition::AutonomousRejected
+                    }
+                    RejectInputClassification::RetainedTombstone => Disposition::Late,
+                    RejectInputClassification::Unmatched => Disposition::Unknown,
+                    RejectInputClassification::ExtensionReason => Disposition::UnsupportedExtension,
+                    RejectInputClassification::Ambiguous => Disposition::Ambiguous,
+                };
+                self.notice = Some(ProtocolNotice::PeerReject(PeerRejectNotice::new(
+                    reason,
+                    disposition,
+                )));
             }
             ProtocolMessage::Control(ControlMessage::SeparateRequest {
                 session_id: _,
                 system_bytes: _,
             }) => self.receive_separate(&mut actions),
             ProtocolMessage::Data(message) => {
-                let _classification = self.receive_data(message, &mut actions);
+                self.receive_inbound_data(message, &mut actions);
             }
-            // Deselect remains outside B2 and is intentionally trace-only.
-            ProtocolMessage::Control(ControlMessage::DeselectRequest { .. })
-            | ProtocolMessage::Control(ControlMessage::DeselectResponse { .. }) => {}
+            ProtocolMessage::Control(ControlMessage::DeselectRequest {
+                session_id,
+                system_bytes,
+            }) => self.receive_deselect_request(session_id, system_bytes, now, &mut actions),
+            ProtocolMessage::Control(ControlMessage::DeselectResponse {
+                session_id,
+                status,
+                system_bytes,
+            }) => {
+                self.receive_deselect_response(session_id, status, system_bytes, now, &mut actions)
+            }
         }
+        self.progress_deselect(now, &mut actions);
         actions
     }
 
@@ -477,14 +608,33 @@ impl SessionCore {
     /// `write_id` identifies the Core-produced frame and `outcome` distinguishes
     /// committed, provably unwritten, and indeterminate delivery. Unknown or
     /// duplicate identities fail closed as runtime invariants.
+    #[cfg(test)]
     pub(crate) fn on_write_outcome(
         &mut self,
         write_id: WriteId,
         outcome: WriteOutcome,
         now: MonoTime,
     ) -> CoreActions {
+        self.on_write_outcome_at(write_id, outcome, now, now)
+    }
+
+    /// Applies a write fact with its actual `occurred_at` and monotonic `now`.
+    ///
+    /// Callback latency must not extend T3/T6. Future occurrence timestamps
+    /// fail closed; already expired commit-derived deadlines fire this turn.
+    pub(crate) fn on_write_outcome_at(
+        &mut self,
+        write_id: WriteId,
+        outcome: WriteOutcome,
+        occurred_at: MonoTime,
+        now: MonoTime,
+    ) -> CoreActions {
         let mut actions = CoreActions::new();
         if !self.accept_time(now, &mut actions) {
+            return actions;
+        }
+        if occurred_at > now {
+            self.fail_runtime_invariant(&mut actions);
             return actions;
         }
         let Some(write) = self.pending_writes.remove(&write_id) else {
@@ -492,12 +642,36 @@ impl SessionCore {
             return actions;
         };
 
+        if outcome == WriteOutcome::Committed && !self.closing {
+            self.record_activity(occurred_at, &mut actions);
+        }
+
+        // A closing Request cannot await a peer response, but Send/Separate can
+        // still prove local commit. Failed writes retain their actual visibility.
+        if outcome == WriteOutcome::Committed
+            && matches!(
+                write.kind,
+                PendingWriteKind::TransactionRequest | PendingWriteKind::DataRequest { .. }
+            )
+        {
+            if let Some(command_id) = write.command_id {
+                if let Some(error) = self.deferred_errors.remove(&command_id) {
+                    self.complete_error(command_id, error, &mut actions);
+                    return actions;
+                }
+            }
+        }
+
         match outcome {
             WriteOutcome::Committed => match write.kind {
                 PendingWriteKind::TransactionRequest => {
                     if let Some(transaction) = self.active_transaction.as_mut() {
                         if transaction.write_id == write_id {
-                            transaction.sent = true;
+                            transaction.deadline =
+                                occurred_at.checked_add(self.config.timeouts.t6());
+                            if transaction.deadline.is_none() {
+                                self.fail_runtime_invariant(&mut actions);
+                            }
                         }
                     }
                 }
@@ -513,7 +687,11 @@ impl SessionCore {
                 PendingWriteKind::DataRequest { system_bytes } => {
                     if let Some(transaction) = self.data_transactions.get_mut(&system_bytes) {
                         if transaction.write_id == write_id {
-                            transaction.sent = true;
+                            transaction.deadline =
+                                occurred_at.checked_add(self.config.timeouts.t3());
+                            if transaction.deadline.is_none() {
+                                self.fail_runtime_invariant(&mut actions);
+                            }
                         }
                     }
                 }
@@ -537,6 +715,7 @@ impl SessionCore {
                 &mut actions,
             ),
         }
+        self.expire_deadlines(now, &mut actions);
         actions
     }
 
@@ -588,19 +767,13 @@ impl SessionCore {
         actions
     }
 
-    /// Advances logical time without implementing deferred T3, T6, or T7 behavior.
-    ///
-    /// The return value is empty for equal or increasing time and fails closed
-    /// for a backwards input. B1 and B2 intentionally schedule no protocol deadline.
+    /// Expires due protocol timers at monotonic `now` in deterministic order.
     pub(crate) fn advance_time(&mut self, now: MonoTime) -> CoreActions {
         let mut actions = CoreActions::new();
-        self.accept_time(now, &mut actions);
+        if self.accept_time(now, &mut actions) {
+            self.expire_deadlines(now, &mut actions);
+        }
         actions
-    }
-
-    /// Returns the earliest logical protocol deadline, absent in B1 and B2.
-    pub(crate) const fn next_deadline(&self) -> Option<MonoTime> {
-        None
     }
 
     /// Starts a local Select request or completes the command with a state error.
@@ -613,7 +786,7 @@ impl SessionCore {
                 if self.active_transaction.is_some() {
                     self.complete_error(command_id, OperationError::ControlBusy, actions);
                 } else {
-                    self.start_transaction(TransactionKind::Select, command_id, actions);
+                    self.start_transaction(TransactionKind::Select, Some(command_id), actions);
                 }
             }
             Some(SessionState::Closing | SessionState::Closed) | None => {
@@ -629,7 +802,7 @@ impl SessionCore {
                 if self.active_transaction.is_some() {
                     self.complete_error(command_id, OperationError::ControlBusy, actions);
                 } else {
-                    self.start_transaction(TransactionKind::Linktest, command_id, actions);
+                    self.start_transaction(TransactionKind::Linktest, Some(command_id), actions);
                 }
             }
             Some(SessionState::Closing | SessionState::Closed) | None => {
@@ -639,22 +812,35 @@ impl SessionCore {
     }
 
     /// Starts local Separate, preempting live control and Data commands in order.
-    fn start_separate(&mut self, command_id: CommandId, actions: &mut CoreActions) {
+    fn start_separate(
+        &mut self,
+        command_id: Option<CommandId>,
+        reason: GenerationCloseReason,
+        actions: &mut CoreActions,
+    ) {
         if self.state != Some(SessionState::Selected) {
-            self.complete_error(command_id, OperationError::NotSelected, actions);
+            if let Some(command_id) = command_id {
+                self.complete_error(command_id, OperationError::NotSelected, actions);
+            }
             return;
         }
-        let Some((system_bytes, write_id)) = self.allocate_request_identifiers() else {
-            self.fail_runtime_invariant(actions);
+        let Some((system_bytes, write_id)) = self.allocate_request_identifiers(actions) else {
             return;
         };
 
         self.state = Some(SessionState::NotSelected);
         self.closing = true;
-        if let Some(transaction) = self.active_transaction.take() {
+        if let Some(drain) = self.deselect_drain.take() {
             self.complete_error(
-                transaction.command_id,
-                OperationError::Protocol(ProtocolError::TransactionAborted),
+                drain.command_id,
+                ProtocolError::TransactionAborted.into(),
+                actions,
+            );
+        }
+        if let Some(transaction) = self.active_transaction.take() {
+            self.complete_control_transaction(
+                transaction,
+                Err(ProtocolError::TransactionAborted.into()),
                 actions,
             );
         }
@@ -663,7 +849,7 @@ impl SessionCore {
             write_id,
             PendingWrite {
                 kind: PendingWriteKind::Separate,
-                command_id: Some(command_id),
+                command_id,
             },
         );
         actions.push(CoreAction::SendFrame {
@@ -674,25 +860,42 @@ impl SessionCore {
             }),
         });
         actions.push(CoreAction::SessionStateChanged(SessionState::NotSelected));
-        self.request_close(
-            GenerationCloseReason::LocalSeparate,
-            CloseBarrier::AfterWrite(write_id),
-            actions,
-        );
+        self.request_close(reason, CloseBarrier::AfterWrite(write_id), actions);
+    }
+
+    /// Ends a finite Stop/Disconnect drain with a tail Separate when Selected.
+    /// Runtime supplies the original lifecycle reason; no application command or
+    /// completion is invented for this internal final frame.
+    pub(crate) fn finish_shutdown_drain(
+        &mut self,
+        reason: GenerationCloseReason,
+        now: MonoTime,
+    ) -> CoreActions {
+        if self.state != Some(SessionState::Selected) || self.closing {
+            return self.on_shutdown(reason, None, now);
+        }
+        let mut actions = CoreActions::new();
+        if self.accept_time(now, &mut actions) {
+            self.start_separate(None, reason, &mut actions);
+        }
+        actions
     }
 
     /// Creates one active Select or Linktest response transaction and request write.
     fn start_transaction(
         &mut self,
         kind: TransactionKind,
-        command_id: CommandId,
+        command_id: Option<CommandId>,
         actions: &mut CoreActions,
     ) {
-        let Some((system_bytes, write_id)) = self.allocate_request_identifiers() else {
-            self.fail_runtime_invariant(actions);
+        let Some((system_bytes, write_id)) = self.allocate_request_identifiers(actions) else {
             return;
         };
         let message = match kind {
+            TransactionKind::Deselect => ControlMessage::DeselectRequest {
+                session_id: CONTROL_SESSION_ID,
+                system_bytes,
+            },
             TransactionKind::Select => ControlMessage::SelectRequest {
                 session_id: CONTROL_SESSION_ID,
                 system_bytes,
@@ -705,13 +908,13 @@ impl SessionCore {
             session_id: CONTROL_SESSION_ID,
             system_bytes,
             write_id,
-            sent: false,
+            deadline: None,
         });
         self.pending_writes.insert(
             write_id,
             PendingWrite {
                 kind: PendingWriteKind::TransactionRequest,
-                command_id: Some(command_id),
+                command_id,
             },
         );
         actions.push(CoreAction::SendFrame {
@@ -732,6 +935,10 @@ impl SessionCore {
         reply_expected: bool,
         actions: &mut CoreActions,
     ) {
+        if self.deselect_drain.is_some() || self.replies_blocked() {
+            self.complete_error(command_id, OperationError::Draining, actions);
+            return;
+        }
         if self.state != Some(SessionState::Selected) {
             self.complete_error(command_id, OperationError::NotSelected, actions);
             return;
@@ -751,8 +958,7 @@ impl SessionCore {
             return;
         }
 
-        let Some((system_bytes, write_id)) = self.allocate_request_identifiers() else {
-            self.fail_runtime_invariant(actions);
+        let Some((system_bytes, write_id)) = self.allocate_request_identifiers(actions) else {
             return;
         };
         let correlation = DataWriteCorrelation {
@@ -770,7 +976,7 @@ impl SessionCore {
                 command_id,
                 write_id,
                 response_contract,
-                sent: false,
+                deadline: None,
             };
             if self
                 .data_transactions
@@ -834,11 +1040,7 @@ impl SessionCore {
                 let (header, body) = message.into_parts();
                 self.complete_request(
                     transaction.command_id,
-                    Ok(MatchedSecondary::new(
-                        header.stream(),
-                        header.function(),
-                        body,
-                    )),
+                    Ok(MatchedSecondary::new(header, body)),
                     actions,
                 );
                 DataInputClassification::MatchedSecondary
@@ -869,6 +1071,7 @@ impl SessionCore {
             SelectStatus::ALREADY_ACTIVE
         } else {
             self.state = Some(SessionState::Selected);
+            self.selection_deadline = None;
             SelectStatus::SUCCESS
         };
         self.send_response(
@@ -918,15 +1121,16 @@ impl SessionCore {
         if status.is_success() {
             if self.state != Some(SessionState::Selected) {
                 self.state = Some(SessionState::Selected);
+                self.selection_deadline = None;
                 actions.push(CoreAction::SessionStateChanged(SessionState::Selected));
             }
-            self.complete_ok(transaction.command_id, actions);
+            self.complete_control_transaction(transaction, Ok(()), actions);
         } else {
             let status = NonZeroU8::new(status.get())
                 .expect("a non-success Select status is necessarily non-zero");
-            self.complete_error(
-                transaction.command_id,
-                OperationError::SelectRejected { status },
+            self.complete_control_transaction(
+                transaction,
+                Err(OperationError::SelectRejected { status }),
                 actions,
             );
         }
@@ -957,7 +1161,7 @@ impl SessionCore {
         }
 
         self.active_transaction = None;
-        self.complete_ok(transaction.command_id, actions);
+        self.complete_control_transaction(transaction, Ok(()), actions);
     }
 
     /// Attributes a base-standard peer Reject to exactly one live operation.
@@ -1028,12 +1232,19 @@ impl SessionCore {
             _ => return RejectInputClassification::Ambiguous,
         };
 
+        let autonomous = matches!(
+            target,
+            RejectTarget::Control(ControlTransaction {
+                command_id: None,
+                ..
+            })
+        );
         match target {
             RejectTarget::Control(transaction) => {
                 self.active_transaction = None;
-                self.complete_error(
-                    transaction.command_id,
-                    OperationError::PeerRejected { reason },
+                self.complete_control_transaction(
+                    transaction,
+                    Err(OperationError::PeerRejected { reason }),
                     actions,
                 );
             }
@@ -1051,7 +1262,17 @@ impl SessionCore {
                 self.complete_error(command_id, OperationError::PeerRejected { reason }, actions);
             }
         }
-        RejectInputClassification::MatchedLiveOperation
+        if autonomous {
+            RejectInputClassification::MatchedAutonomousOperation
+        } else {
+            RejectInputClassification::MatchedLiveOperation
+        }
+    }
+
+    /// Transfers this input round's diagnostic after all ordered actions apply.
+    /// Driver consumes it once per inbound round; it never owns protocol work.
+    pub(crate) fn take_notice(&mut self) -> Option<crate::hsms::ProtocolNotice> {
+        self.notice.take()
     }
 
     /// Applies peer Separate in Selected and ignores it in NotSelected.
@@ -1061,9 +1282,9 @@ impl SessionCore {
         }
         self.state = Some(SessionState::NotSelected);
         if let Some(transaction) = self.active_transaction.take() {
-            self.complete_error(
-                transaction.command_id,
-                OperationError::Protocol(ProtocolError::TransactionAborted),
+            self.complete_control_transaction(
+                transaction,
+                Err(ProtocolError::TransactionAborted.into()),
                 actions,
             );
         }
@@ -1163,8 +1384,27 @@ impl SessionCore {
         }
     }
 
-    /// Allocates the System Bytes and WriteId for one locally generated request.
-    fn allocate_request_identifiers(&mut self) -> Option<(SystemBytes, WriteId)> {
+    /// Allocates a fresh tuple or emits shutdown without wrapping either ID.
+    ///
+    /// Exhausting the protocol's 32-bit space is normal generation retirement.
+    /// Internal 64-bit WriteId exhaustion remains a local runtime failure.
+    fn allocate_request_identifiers(
+        &mut self,
+        actions: &mut CoreActions,
+    ) -> Option<(SystemBytes, WriteId)> {
+        if self.next_write_id.is_none() {
+            self.fail_runtime_invariant(actions);
+            return None;
+        }
+        if self.next_system_bytes.is_none() {
+            self.complete_all(OperationError::ConnectionLost, actions);
+            self.request_close(
+                GenerationCloseReason::SystemBytesExhausted,
+                CloseBarrier::Immediate,
+                actions,
+            );
+            return None;
+        }
         let system_bytes = self.allocate_system_bytes()?;
         let write_id = self.allocate_write_id()?;
         Some((system_bytes, write_id))
@@ -1271,6 +1511,7 @@ impl SessionCore {
             self.fail_runtime_invariant(actions);
             return;
         }
+        self.deferred_errors.remove(&command_id);
         for write in self.pending_writes.values_mut() {
             if write.command_id == Some(command_id) {
                 write.command_id = None;
@@ -1279,7 +1520,7 @@ impl SessionCore {
         actions.push(CoreAction::CompleteCommand { command_id, result });
     }
 
-    /// Completes all live Data commands as deselected while retaining writes.
+    /// Ends Data transactions, deferring deselection until unresolved writes settle.
     fn complete_data_for_deselection(&mut self, actions: &mut CoreActions) {
         self.data_transactions.clear();
         let command_ids: Vec<_> = self
@@ -1291,18 +1532,65 @@ impl SessionCore {
             })
             .collect();
         for command_id in command_ids {
-            self.complete_error(command_id, OperationError::SessionDeselected, actions);
+            self.complete_or_defer(command_id, OperationError::SessionDeselected, actions);
         }
     }
 
-    /// Completes every still-open command deterministically in CommandId order.
+    /// Ends protocol transactions while retaining commands with unresolved writes.
     fn complete_all(&mut self, error: OperationError, actions: &mut CoreActions) {
         self.active_transaction = None;
         self.data_transactions.clear();
         let command_ids: Vec<_> = self.open_commands.keys().copied().collect();
         for command_id in command_ids {
-            self.complete_error(command_id, error.clone(), actions);
+            self.complete_or_defer(command_id, error.clone(), actions);
         }
+    }
+
+    /// Defers `error` if visibility is unresolved; otherwise completes immediately.
+    fn complete_or_defer(
+        &mut self,
+        command_id: CommandId,
+        error: OperationError,
+        actions: &mut CoreActions,
+    ) {
+        if self
+            .pending_writes
+            .values()
+            .any(|write| write.command_id == Some(command_id))
+        {
+            self.deferred_errors.entry(command_id).or_insert(error);
+        } else {
+            self.complete_error(command_id, error, actions);
+        }
+    }
+
+    /// Conservatively settles missing outcomes after Writer termination is proven.
+    ///
+    /// Driver must first drain all actual outcomes and ensure no Writer can ever
+    /// touch this generation again. Missing visibility proof is Indeterminate,
+    /// never NotWritten. This operation is idempotent during terminal cleanup.
+    pub(crate) fn finalize_writer(&mut self, now: MonoTime) -> CoreActions {
+        let mut actions = CoreActions::new();
+        if !self.accept_time(now, &mut actions) {
+            return actions;
+        }
+        if !self.closing {
+            self.fail_runtime_invariant(&mut actions);
+            return actions;
+        }
+        let mut writes: Vec<_> = self.pending_writes.drain().collect();
+        writes.sort_unstable_by_key(|(write_id, _)| *write_id);
+        for (_, write) in writes {
+            if let Some(command_id) = write.command_id {
+                self.complete_error(
+                    command_id,
+                    OperationError::DeliveryIndeterminate,
+                    &mut actions,
+                );
+            }
+        }
+        self.complete_all(OperationError::ConnectionLost, &mut actions);
+        actions
     }
 
     /// Records closing and emits the first close action returned by normal Core flow.
@@ -1313,6 +1601,8 @@ impl SessionCore {
         actions: &mut CoreActions,
     ) {
         self.closing = true;
+        self.deselect_drain = None;
+        self.reply_contracts.clear();
         if self.close_action_issued {
             return;
         }
@@ -1515,7 +1805,7 @@ mod tests {
         );
     }
 
-    /// Confirms pre-connected and explicitly deferred B1 messages have no semantics.
+    /// Pre-connect input is isolated; connected NotSelected handles Deselect.
     #[test]
     fn out_of_slice_messages_are_safely_isolated() {
         let mut core = core();
@@ -1538,7 +1828,7 @@ mod tests {
             }]
         );
         connect(&mut core);
-        assert!(core
+        let response = core
             .on_message(
                 ProtocolMessage::Control(ControlMessage::DeselectRequest {
                     session_id: CONTROL_SESSION_ID,
@@ -1546,17 +1836,19 @@ mod tests {
                 }),
                 now(0),
             )
-            .into_actions()
-            .is_empty());
+            .into_actions();
+        assert!(matches!(response.as_slice(), [CoreAction::SendFrame {
+            message: ProtocolMessage::Control(ControlMessage::DeselectResponse { status, .. }), ..
+        }] if *status == crate::hsms::protocol::header::DeselectStatus::NOT_SELECTED));
     }
 
-    /// Confirms equal time is legal, deadlines are absent, and regression fails closed.
+    /// Confirms T7 is armed, equal time is legal, and regression fails closed.
     #[test]
     fn logical_time_is_monotonic_without_b1_deadlines() {
         let mut core = core();
         connect(&mut core);
 
-        assert_eq!(core.next_deadline(), None);
+        assert_eq!(core.next_deadline(), Some(now(10_000)));
         assert!(core.advance_time(now(0)).into_actions().is_empty());
         assert!(core.advance_time(now(5)).into_actions().is_empty());
         assert_eq!(
@@ -1602,7 +1894,7 @@ mod tests {
             .on_write_outcome(write_id, WriteOutcome::Committed, now(2))
             .into_actions()
             .is_empty());
-        assert!(core.active_transaction.unwrap().sent);
+        assert!(core.active_transaction.unwrap().deadline.is_some());
         assert_eq!(
             core.on_message(
                 ProtocolMessage::Control(ControlMessage::SelectResponse {
@@ -1863,7 +2155,7 @@ mod tests {
     fn passive_select_admission_failure_closes_other_transaction_as_connection_lost() {
         let mut core = core();
         connect(&mut core);
-        let _ = start_select(&mut core, 50);
+        let (local_write, _) = start_select(&mut core, 50);
         let passive = core
             .on_message(
                 ProtocolMessage::Control(ControlMessage::SelectRequest {
@@ -1882,16 +2174,19 @@ mod tests {
                 now(3),
             )
             .into_actions(),
-            vec![
-                CoreAction::CompleteCommand {
-                    command_id: CommandId::new(50),
-                    result: CoreCommandResult::Control(Err(OperationError::ConnectionLost)),
-                },
-                CoreAction::CloseGeneration {
-                    reason: GenerationCloseReason::ControlBackpressure,
-                    barrier: CloseBarrier::Immediate,
-                },
-            ]
+            vec![CoreAction::CloseGeneration {
+                reason: GenerationCloseReason::ControlBackpressure,
+                barrier: CloseBarrier::Immediate,
+            },]
+        );
+        assert_eq!(core.open_command_count(), 1);
+        assert_eq!(
+            core.on_write_outcome(local_write, WriteOutcome::Committed, now(4))
+                .into_actions(),
+            vec![CoreAction::CompleteCommand {
+                command_id: CommandId::new(50),
+                result: CoreCommandResult::Control(Err(OperationError::ConnectionLost)),
+            }]
         );
     }
 
@@ -2442,7 +2737,7 @@ mod tests {
 
     /// Confirms allocation exhaustion closes and completes the accepted command once.
     #[test]
-    fn request_identifier_exhaustion_fails_closed() {
+    fn system_bytes_exhaustion_requests_generation_retirement() {
         let mut core = core();
         connect(&mut core);
         core.next_system_bytes = None;
@@ -2456,16 +2751,16 @@ mod tests {
                     result: CoreCommandResult::Control(Err(OperationError::ConnectionLost)),
                 },
                 CoreAction::CloseGeneration {
-                    reason: GenerationCloseReason::RuntimeInvariant,
+                    reason: GenerationCloseReason::SystemBytesExhausted,
                     barrier: CloseBarrier::Immediate,
                 },
             ]
         );
     }
 
-    /// Confirms normal external shutdown completes the live command before close.
+    /// Shutdown retains unresolved command visibility until Writer termination.
     #[test]
-    fn external_shutdown_completes_pending_command_before_close() {
+    fn external_shutdown_retains_pending_command_until_writer_finalization() {
         let mut core = core();
         connect(&mut core);
         let _ = core.on_command(command(180, CoreCommandKind::Linktest), now(1));
@@ -2473,17 +2768,21 @@ mod tests {
         assert_eq!(
             core.on_shutdown(GenerationCloseReason::LocalDisconnect, None, now(2))
                 .into_actions(),
-            vec![
-                CoreAction::CompleteCommand {
-                    command_id: CommandId::new(180),
-                    result: CoreCommandResult::Control(Err(OperationError::ConnectionLost)),
-                },
-                CoreAction::CloseGeneration {
-                    reason: GenerationCloseReason::LocalDisconnect,
-                    barrier: CloseBarrier::Immediate,
-                },
-            ]
+            vec![CoreAction::CloseGeneration {
+                reason: GenerationCloseReason::LocalDisconnect,
+                barrier: CloseBarrier::Immediate,
+            },]
         );
+        assert_eq!(core.open_command_count(), 1);
+        assert_eq!(
+            core.finalize_writer(now(3)).into_actions(),
+            vec![CoreAction::CompleteCommand {
+                command_id: CommandId::new(180),
+                result: CoreCommandResult::Control(Err(OperationError::DeliveryIndeterminate)),
+            }]
+        );
+        assert!(core.finalize_writer(now(3)).into_actions().is_empty());
+        assert_eq!(core.pending_write_count(), 0);
     }
 
     /// Confirms unmatched Linktest Reject uses the exact response SType constant.
@@ -2673,8 +2972,13 @@ mod tests {
             vec![CoreAction::CompleteCommand {
                 command_id: CommandId::new(220),
                 result: CoreCommandResult::Request(Ok(MatchedSecondary::new(
-                    Stream::new(3).unwrap(),
-                    Function::new(6),
+                    DataHeader::new(
+                        SessionId::new(7).unwrap(),
+                        Stream::new(3).unwrap(),
+                        Function::new(6),
+                        false,
+                        system_bytes
+                    ),
                     body,
                 ))),
             }]
@@ -2690,9 +2994,9 @@ mod tests {
     }
 
     /// Confirms F255 requests accept only header-only F0 and retain their
-    /// completed contract as a tombstone without creating a B2 deadline.
+    /// completed contract as a tombstone; T3 is absent before write commit.
     #[test]
-    fn f255_request_is_abort_only_and_has_no_timeout() {
+    fn f255_request_is_abort_only_and_waits_for_commit_before_t3() {
         let mut core = core();
         connect(&mut core);
         let passive_write = select_passively(&mut core);
@@ -2720,7 +3024,11 @@ mod tests {
             )
             .into_actions()
             .is_empty());
-        assert_eq!(core.next_deadline(), None);
+        assert!(core
+            .data_transactions
+            .values()
+            .all(|transaction| transaction.deadline.is_none()));
+        assert_eq!(core.next_deadline(), Some(now(30_004)));
         assert!(core.advance_time(now(10_000)).into_actions().is_empty());
         assert_eq!(
             core.on_message(
@@ -2915,8 +3223,13 @@ mod tests {
                 vec![CoreAction::CompleteCommand {
                     command_id: CommandId::new(262),
                     result: CoreCommandResult::Request(Ok(MatchedSecondary::new(
-                        Stream::new(2).unwrap(),
-                        Function::new(2),
+                        DataHeader::new(
+                            session_id,
+                            Stream::new(2).unwrap(),
+                            Function::new(2),
+                            false,
+                            second_system_bytes
+                        ),
                         None,
                     ))),
                 }]
@@ -3236,8 +3549,7 @@ mod tests {
         assert_eq!(core.tombstone_count(), 0);
     }
 
-    /// Confirms Separate gives all still-open Data commands typed deselection
-    /// failures while retaining their accepted writes for unique late outcomes.
+    /// Separate preserves Send commit proof and defers Request deselection until commit.
     #[test]
     fn separate_preempts_data_commands_without_dropping_write_tracking() {
         let mut core = core();
@@ -3262,27 +3574,24 @@ mod tests {
         let separate = core
             .on_command(command(252, CoreCommandKind::Separate), now(5))
             .into_actions();
-        assert!(matches!(
-            &separate[0],
-            CoreAction::CompleteCommand {
-                command_id,
-                result: CoreCommandResult::Send(Err(OperationError::SessionDeselected)),
-            } if *command_id == CommandId::new(250)
-        ));
-        assert!(matches!(
-            &separate[1],
-            CoreAction::CompleteCommand {
-                command_id,
+        assert!(!separate
+            .iter()
+            .any(|action| matches!(action, CoreAction::CompleteCommand { .. })));
+        assert_eq!(
+            core.on_write_outcome(send_write, WriteOutcome::Committed, now(6))
+                .into_actions(),
+            vec![CoreAction::CompleteCommand {
+                command_id: CommandId::new(250),
+                result: CoreCommandResult::Send(Ok(super::CommittedWrite::new(send_write))),
+            }]
+        );
+        assert_eq!(
+            core.on_write_outcome(request_write, WriteOutcome::Committed, now(7))
+                .into_actions(),
+            vec![CoreAction::CompleteCommand {
+                command_id: CommandId::new(251),
                 result: CoreCommandResult::Request(Err(OperationError::SessionDeselected)),
-            } if *command_id == CommandId::new(251)
-        ));
-        assert!(core
-            .on_write_outcome(send_write, WriteOutcome::Committed, now(6))
-            .into_actions()
-            .is_empty());
-        assert!(core
-            .on_write_outcome(request_write, WriteOutcome::Committed, now(7))
-            .into_actions()
-            .is_empty());
+            }]
+        );
     }
 }

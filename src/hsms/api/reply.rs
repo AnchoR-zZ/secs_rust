@@ -4,8 +4,6 @@
 //! body when bounded admission or generation validation fails. They never
 //! represent failures after a command has entered the protocol core.
 
-#![allow(dead_code)]
-
 use std::{error::Error as StdError, fmt};
 
 use thiserror::Error;
@@ -33,6 +31,12 @@ pub enum ReplyIntent {
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ReplyAdmissionReason {
+    /// Reply Message Text could not be represented within outbound limits.
+    #[error("invalid outbound reply message")]
+    InvalidMessage,
+    /// The capability belongs to another owner or is no longer available.
+    #[error("reply capability is unavailable for this endpoint")]
+    CapabilityUnavailable,
     /// The logical endpoint has not been started.
     #[error("HSMS endpoint is not running")]
     NotRunning,
@@ -82,6 +86,7 @@ pub struct ReplyAdmissionError {
 
 impl ReplyAdmissionError {
     /// Returns a rejected normal-Secondary operation with all inputs intact.
+    #[cfg(any(feature = "runtime-tokio", test))]
     pub(crate) const fn secondary(
         reason: ReplyAdmissionReason,
         token: ReplyToken,
@@ -96,6 +101,7 @@ impl ReplyAdmissionError {
     }
 
     /// Returns a rejected header-only SxF0 abort with its token intact.
+    #[cfg(any(feature = "runtime-tokio", test))]
     pub(crate) const fn abort(reason: ReplyAdmissionReason, token: ReplyToken) -> Self {
         Self {
             reason,
@@ -106,6 +112,7 @@ impl ReplyAdmissionError {
     }
 
     /// Returns a rejected local capability abandonment with its token intact.
+    #[cfg(any(feature = "runtime-tokio", test))]
     pub(crate) const fn abandon(reason: ReplyAdmissionReason, token: ReplyToken) -> Self {
         Self {
             reason,

@@ -1,33 +1,39 @@
 //! Sans-I/O composition of HSMS framing, validation, and the SECS-II profile.
 //!
 //! `HsmsSsCodec` is the runtime-facing boundary for one TCP generation. It
-//! keeps fatal framing separate from recoverable protocol violations and
-//! encodes semantic Data messages into one exactly sized contiguous buffer.
+//! keeps fatal framing separate from recoverable protocol violations. Reference
+//! encoding helpers are test-only; production writes use the bounded Writer.
 
-#![allow(dead_code)]
-
-use bytes::{Bytes, BytesMut};
+#[cfg(test)]
+use crate::{
+    hsms::{
+        protocol::{header::DataHeader, violation::InboundViolation},
+        wire::{framer::HsmsWireEncoder, validation::FrameEncodeError},
+    },
+    secs2::codec::EncodeError,
+};
+#[cfg(test)]
+use bytes::Bytes;
+use bytes::BytesMut;
+#[cfg(test)]
 use thiserror::Error;
 
 use crate::{
     hsms::{
         profile::secs2::{Secs2Profile, StrictSecs2Profile},
         protocol::{
-            header::DataHeader,
             message::{DataMessage, ProtocolMessage},
-            violation::{
-                HeaderViolation, InboundViolation, PayloadViolation, PayloadViolationKind,
-            },
+            violation::{HeaderViolation, PayloadViolation, PayloadViolationKind},
         },
         wire::{
             frame::ValidatedFrame,
-            framer::{FrameDecodeStep, FrameReadProgress, HsmsFrameDecoder, HsmsWireEncoder},
-            validation::{FrameEncodeError, FramingFault},
+            framer::{FrameDecodeStep, FrameReadProgress, HsmsFrameDecoder},
+            validation::FramingFault,
             validator::StrictFrameValidator,
         },
         EndpointLimits,
     },
-    secs2::codec::{DecodeError, EncodeError, Secs2Decoder},
+    secs2::codec::{DecodeError, Secs2Decoder},
 };
 
 /// Non-fatal result of one inbound composition-codec step.
@@ -52,6 +58,7 @@ pub(crate) enum HsmsSsDecodeStep {
     },
 }
 
+#[cfg(test)]
 impl HsmsSsDecodeStep {
     /// Converts either recoverable failure variant to the Core contract.
     ///
@@ -68,6 +75,7 @@ impl HsmsSsDecodeStep {
 
 /// Outbound semantic-message encoding failure.
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
+#[cfg(test)]
 pub(crate) enum HsmsSsEncodeError {
     /// The optional SECS-II body cannot be represented by the E5 codec.
     #[error("failed to encode SECS-II Message Text for Data header {header:?}: {source}")]
@@ -98,6 +106,7 @@ pub(crate) struct HsmsSsCodec {
     /// PType=0 absent-text and strict SECS-II mapping.
     profile: StrictSecs2Profile,
     /// Checked semantic-header encoder sharing the endpoint frame bound.
+    #[cfg(test)]
     wire_encoder: HsmsWireEncoder,
 }
 
@@ -108,6 +117,7 @@ impl HsmsSsCodec {
             frame_decoder: HsmsFrameDecoder::new(limits),
             frame_validator: StrictFrameValidator::new(),
             profile: StrictSecs2Profile::new(secs2_decoder),
+            #[cfg(test)]
             wire_encoder: HsmsWireEncoder::new(limits),
         }
     }
@@ -165,6 +175,7 @@ impl HsmsSsCodec {
     /// Returns [`HsmsSsEncodeError::Payload`] for SECS-II representation
     /// failures or [`HsmsSsEncodeError::Frame`] when the measured final frame
     /// exceeds the configured HSMS bound.
+    #[cfg(test)]
     pub(crate) fn encode(&self, message: &ProtocolMessage) -> Result<Bytes, HsmsSsEncodeError> {
         match message {
             ProtocolMessage::Control(message) => Ok(self.wire_encoder.encode_control(*message)),
@@ -173,6 +184,7 @@ impl HsmsSsCodec {
     }
 
     /// Encodes one semantic Data message using a single final allocation.
+    #[cfg(test)]
     fn encode_data(&self, message: &DataMessage) -> Result<Bytes, HsmsSsEncodeError> {
         let header = message.header();
         let body_plan = self

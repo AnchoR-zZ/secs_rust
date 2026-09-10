@@ -65,7 +65,7 @@ pub(crate) trait Secs2Profile {
     ) -> Result<Secs2BodyPlan<'a>, EncodeError>;
 }
 
-/// Strict built-in HSMS-SS profile backed by the Wave 1 SECS-II codec.
+/// Strict built-in HSMS-SS profile backed by the SECS-II codec.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct StrictSecs2Profile {
     /// Resource-bounded decoder applied to every non-empty Message Text.

@@ -2,7 +2,7 @@
 //!
 //! This module converts between the PEER SML text notation and the crate's
 //! [`SecsItem`](crate::secs2::SecsItem) trees plus validated
-//! [`Stream`](crate::hsms::Stream)/[`Function`](crate::hsms::Function)
+//! [`Stream`](crate::secs2::Stream)/[`Function`](crate::secs2::Function)
 //! identifiers. It is a pure text layer: it owns no I/O, system bytes, or
 //! session state, and it never judges function parity or send policy — those
 //! belong to the HSMS layer.
