@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 description = "Greenfield HSMS-SS and SECS-II protocol library"
-include = ["/src/**", "/tests/**", "/examples/**", "/Cargo.toml", "/LICENSE", "/README.md", "/USAGE.md", "/ARCHITECTURE.md", "/ACCEPTANCE.md", "/STANDARD_TRACE.md"]
+include = ["/src/**", "/tests/**", "/examples/**", "/Cargo.toml", "/LICENSE", "/README.md", "/USAGE.md"]
 
 [features]
 default = ["runtime-tokio"]

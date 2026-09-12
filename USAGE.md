@@ -1,10 +1,10 @@
 # 使用协议库
 
-`secs2` 和 `sml` 可独立使用。默认开启 `runtime-tokio`，提供真实 TCP 上的单会话 HSMS 端点。实现契约与测试证据见 [ARCHITECTURE.md](ARCHITECTURE.md)。本库管理传输、选择状态、事务和回复关联，应用负责消息的业务含义与 GEM 行为。
+`secs2` 和 `sml` 可独立使用。默认开启 `runtime-tokio`，提供真实 TCP 上的单会话 HSMS 端点。实现契约与测试证据见 [ARCHITECTURE.md](document/ARCHITECTURE.md)。本库管理传输、选择状态、事务和回复关联，应用负责消息的业务含义与 GEM 行为。
 
 Passive 端点只维护一个活动 generation，采用 E37-0298 §9.2.4.1(c) 的停止监听策略：接纳连接后释放监听器，直到旧 generation 清理完成才在原地址重新监听。额外 connect 可能被操作系统拒绝或超时。Disconnect 保留地址和运行意图，不承诺返回时下一次监听已就绪；Active 对端应按 T5 重试。若原地址重新绑定失败，端点报告连接尝试失败并进入 Faulted。
 
-Active 的 T5 从一次 connect 尝试结束后开始计算，包括成功、失败、超时或取消；等待重试期间取消等待不会重置既有期限。标准基线核对与尚未解决的差异见 [STANDARD_TRACE.md](STANDARD_TRACE.md)。
+Active 的 T5 从一次 connect 尝试结束后开始计算，包括成功、失败、超时或取消；等待重试期间取消等待不会重置既有期限。标准基线核对与尚未解决的差异见 [STANDARD_TRACE.md](document/STANDARD_TRACE.md)。
 
 ## 运行示例
 
