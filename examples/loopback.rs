@@ -63,10 +63,7 @@ async fn main() -> Result<(), ExampleError> {
             let receipt = passive
                 .reply(token, Some(SecsItem::Binary(vec![4, 5, 6])))
                 .await?;
-            println!(
-                "reply committed at wire sequence {}",
-                receipt.wire_sequence()
-            );
+            println!("reply committed on connection {}", receipt.generation());
             Ok::<(), ExampleError>(())
         };
         let (response, ()) = tokio::try_join!(

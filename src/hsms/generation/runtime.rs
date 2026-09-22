@@ -389,7 +389,7 @@ impl<Observer: SessionStateObserver, Completion: CommandCompletion>
         report: super::transport::bounded_writer::WriterReport,
         now: MonoTime,
     ) {
-        if driver.wire_sequence(report.write_id) != Some(report.sequence) {
+        if !driver.has_admitted_write(report.write_id) {
             driver.on_shutdown(GenerationCloseReason::RuntimeInvariant, None, now);
             return;
         }
@@ -789,9 +789,9 @@ mod tests {
         .unwrap();
     }
 
-    /// A corrupted Writer sequence cannot fabricate a successful local send receipt.
+    /// An unknown Writer identity cannot fabricate a successful local send receipt.
     #[tokio::test]
-    async fn mismatched_writer_sequence_closes_and_settles_conservatively() {
+    async fn unknown_writer_identity_closes_and_settles_conservatively() {
         tokio::time::timeout(Duration::from_secs(2), async {
             let (mut runtime, mut peer) = selected_connection().await;
             while runtime.driver().pending_write_count() != 0 {
@@ -812,7 +812,7 @@ mod tests {
             let Some(IoEvent::Write(mut report)) = runtime.io.next().await else {
                 panic!("Writer result expected")
             };
-            report.sequence = crate::hsms::model::ids::WireSequence::new(u64::MAX);
+            report.write_id = crate::hsms::model::ids::WriteId::new(u64::MAX);
             let now = MonoTime::from_elapsed(runtime.epoch.elapsed());
             GenerationRuntime::<Observer, Completion>::apply_write_report(
                 &mut runtime.driver,

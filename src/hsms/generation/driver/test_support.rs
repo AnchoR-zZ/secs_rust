@@ -24,7 +24,7 @@ use crate::hsms::{
     },
     lifecycle::SessionState,
     model::{
-        ids::{ConnectionGeneration, SessionId, SystemBytes, WireSequence, WriteId},
+        ids::{ConnectionGeneration, SessionId, SystemBytes, WriteId},
         runtime::{GenerationCloseReason, MonoTime, WriteOutcome},
     },
     protocol::{
@@ -78,8 +78,6 @@ pub(super) enum TraceEvent {
     WriterAdmitted {
         /// Core-assigned identity of the accepted frame.
         write_id: WriteId,
-        /// Writer-assigned generation-local total order.
-        sequence: WireSequence,
         /// Complete semantic message transferred to Writer ownership.
         message: ProtocolMessage,
     },
@@ -185,8 +183,6 @@ impl SharedTrace {
 pub(super) struct AdmittedFrame {
     /// Core-assigned write identity retained for outcome injection.
     pub(super) write_id: WriteId,
-    /// Writer-assigned total wire order.
-    pub(super) sequence: WireSequence,
     /// Owned semantic message accepted by the fake Writer.
     pub(super) message: ProtocolMessage,
 }
@@ -205,8 +201,6 @@ pub(super) struct FakeDataPermit {
 pub(super) struct FakeWriter {
     /// Stable owner identity embedded in every permit created by this fake.
     writer_id: u64,
-    /// Next sequence number allocated by a successful admission.
-    next_sequence: Option<u64>,
     /// Next Data reservation identity, or `None` after exhaustion.
     next_reservation_id: Option<u64>,
     /// Currently available Control-lane queue slots.
@@ -238,7 +232,6 @@ impl FakeWriter {
     ) -> Self {
         Self {
             writer_id: NEXT_FAKE_WRITER_ID.fetch_add(1, Ordering::Relaxed),
-            next_sequence: Some(0),
             next_reservation_id: Some(0),
             available_control_capacity: control_capacity,
             available_data_capacity: data_capacity,
@@ -314,13 +307,6 @@ impl FakeWriter {
         self.trace
             .push(TraceEvent::WriterOutcome { write_id, outcome });
         Ok(())
-    }
-
-    /// Allocates the next total wire sequence without wrapping.
-    fn allocate_sequence(&mut self) -> Option<WireSequence> {
-        let value = self.next_sequence?;
-        self.next_sequence = value.checked_add(1);
-        Some(WireSequence::new(value))
     }
 
     /// Retires a permit owned by this Writer and restores no capacity itself.
@@ -400,7 +386,7 @@ impl WriterIngress for FakeWriter {
         &mut self,
         permit: Self::DataPermit,
         frame: OutboundFrame,
-    ) -> Result<WireSequence, ReservedDataAdmissionError> {
+    ) -> Result<(), ReservedDataAdmissionError> {
         self.take_reservation(&permit)
             .map_err(|DataPermitError::Invariant| ReservedDataAdmissionError::Invariant)?;
         if !matches!(frame.message(), ProtocolMessage::Data(_)) {
@@ -417,11 +403,6 @@ impl WriterIngress for FakeWriter {
             });
             return Err(error);
         }
-        let Some(sequence) = self.allocate_sequence() else {
-            self.restore_data_capacity()
-                .map_err(|DataPermitError::Invariant| ReservedDataAdmissionError::Invariant)?;
-            return Err(ReservedDataAdmissionError::Invariant);
-        };
         let (write_id, message) = frame.into_parts();
         self.trace.push(TraceEvent::DataPermitConsumed {
             reservation_id: permit.reservation_id,
@@ -429,19 +410,14 @@ impl WriterIngress for FakeWriter {
         });
         self.trace.push(TraceEvent::WriterAdmitted {
             write_id,
-            sequence,
             message: message.clone(),
         });
-        self.admitted.push(AdmittedFrame {
-            write_id,
-            sequence,
-            message,
-        });
-        Ok(sequence)
+        self.admitted.push(AdmittedFrame { write_id, message });
+        Ok(())
     }
 
     /// Accepts one frame with total order or rejects it without Writer state.
-    fn try_admit(&mut self, frame: OutboundFrame) -> Result<WireSequence, WriteAdmissionError> {
+    fn try_admit(&mut self, frame: OutboundFrame) -> Result<(), WriteAdmissionError> {
         if !matches!(frame.message(), ProtocolMessage::Control(_)) {
             return Err(WriteAdmissionError::Invariant);
         }
@@ -459,22 +435,14 @@ impl WriterIngress for FakeWriter {
             });
             return Err(WriteAdmissionError::Full);
         }
-        let Some(sequence) = self.allocate_sequence() else {
-            return Err(WriteAdmissionError::Invariant);
-        };
         self.available_control_capacity -= 1;
         let (write_id, message) = frame.into_parts();
         self.trace.push(TraceEvent::WriterAdmitted {
             write_id,
-            sequence,
             message: message.clone(),
         });
-        self.admitted.push(AdmittedFrame {
-            write_id,
-            sequence,
-            message,
-        });
-        Ok(sequence)
+        self.admitted.push(AdmittedFrame { write_id, message });
+        Ok(())
     }
 }
 

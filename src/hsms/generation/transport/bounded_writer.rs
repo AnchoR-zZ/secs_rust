@@ -13,7 +13,7 @@ use super::{
 use crate::{
     hsms::{
         model::{
-            ids::{WireSequence, WriteId},
+            ids::WriteId,
             runtime::{MonoTime, TransportFault, TransportFaultKind, WriteOutcome},
         },
         profile::secs2::{Secs2Profile, StrictSecs2Profile},
@@ -54,8 +54,6 @@ struct Charge {
 struct QueuedFrame {
     /// Core identity used for exactly-once settlement.
     write_id: WriteId,
-    /// Writer-assigned total order, shared by both lanes.
-    sequence: WireSequence,
     /// Complete immutable wire representation owned by this queue entry.
     bytes: Vec<u8>,
     /// Absolute admission-to-completion deadline.
@@ -81,8 +79,6 @@ pub(crate) struct PreparedData {
 pub(crate) struct WriterReport {
     /// Exact Core-assigned identity of this admitted frame.
     pub(crate) write_id: WriteId,
-    /// Original FIFO admission sequence.
-    pub(crate) sequence: WireSequence,
     /// Actual local write visibility fact.
     pub(crate) outcome: WriteOutcome,
     /// Occurrence time measured from the generation's shared epoch.
@@ -111,8 +107,6 @@ pub(crate) struct BoundedWriter {
     limits: EndpointLimits,
     /// Writer byte/time policy shared with the worker.
     policy: WriterPolicy,
-    /// Next FIFO sequence, absent after checked exhaustion.
-    next_sequence: Option<u64>,
 }
 
 /// Sole write-half task and its bounded report producer.
@@ -183,7 +177,6 @@ impl BoundedWriter {
                 profile: StrictSecs2Profile::new(Secs2Decoder::default()),
                 limits,
                 policy,
-                next_sequence: Some(0),
             },
             WriterWorker {
                 queue: receiver,
@@ -195,12 +188,9 @@ impl BoundedWriter {
         ))
     }
 
-    /// Assigns FIFO identity and deadline only at actual admission.
-    fn admission(&mut self) -> Option<(WireSequence, Instant)> {
-        let deadline = Instant::now().checked_add(self.policy.residence)?;
-        let raw = self.next_sequence?;
-        self.next_sequence = raw.checked_add(1);
-        Some((WireSequence::new(raw), deadline))
+    /// Computes the residence deadline at admission; returns None on overflow.
+    fn admission_deadline(&self) -> Option<Instant> {
+        Instant::now().checked_add(self.policy.residence)
     }
 }
 
@@ -280,7 +270,7 @@ impl WriterIngress for BoundedWriter {
         &mut self,
         mut permit: PreparedData,
         frame: OutboundFrame,
-    ) -> Result<WireSequence, ReservedDataAdmissionError> {
+    ) -> Result<(), ReservedDataAdmissionError> {
         if !Arc::ptr_eq(&self.owner, &permit.owner) {
             return Err(ReservedDataAdmissionError::Invariant);
         }
@@ -298,21 +288,20 @@ impl WriterIngress for BoundedWriter {
         let mut header = Vec::with_capacity(14);
         plan.write_prefix_and_header(&mut header, message.header());
         permit.bytes[..14].copy_from_slice(&header);
-        let (sequence, deadline) = self
-            .admission()
+        let deadline = self
+            .admission_deadline()
             .ok_or(ReservedDataAdmissionError::Invariant)?;
         permit.queue.send(QueuedFrame {
             write_id,
-            sequence,
             bytes: permit.bytes,
             deadline,
             charge: permit.charge,
         });
-        Ok(sequence)
+        Ok(())
     }
 
     /// Admits fixed-size Control using its independent lane and the same FIFO.
-    fn try_admit(&mut self, frame: OutboundFrame) -> Result<WireSequence, WriteAdmissionError> {
+    fn try_admit(&mut self, frame: OutboundFrame) -> Result<(), WriteAdmissionError> {
         let (write_id, message) = frame.into_parts();
         let ProtocolMessage::Control(message) = message else {
             return Err(WriteAdmissionError::Invariant);
@@ -333,10 +322,11 @@ impl WriterIngress for BoundedWriter {
             }
         })?;
         let bytes = self.encoder.encode_control(message).to_vec();
-        let (sequence, deadline) = self.admission().ok_or(WriteAdmissionError::Invariant)?;
+        let deadline = self
+            .admission_deadline()
+            .ok_or(WriteAdmissionError::Invariant)?;
         queue.send(QueuedFrame {
             write_id,
-            sequence,
             bytes,
             deadline,
             charge: Charge {
@@ -344,7 +334,7 @@ impl WriterIngress for BoundedWriter {
                 _bytes: None,
             },
         });
-        Ok(sequence)
+        Ok(())
     }
 }
 
@@ -396,7 +386,6 @@ impl WriterWorker {
             }
             let report = WriterReport {
                 write_id: entry.write_id,
-                sequence: entry.sequence,
                 outcome,
                 occurred_at: MonoTime::from_elapsed(self.epoch.elapsed()),
                 _charge: entry.charge,
@@ -473,7 +462,7 @@ mod tests {
             ingress.try_reserve_message(None),
             Err(OperationError::Backpressure)
         ));
-        assert_eq!(ingress.try_admit(control(1)), Ok(WireSequence::new(0)));
+        assert_eq!(ingress.try_admit(control(1)), Ok(()));
         ingress.release_data(permit).unwrap();
         assert!(ingress.try_reserve_message(None).is_ok());
         assert_eq!(
@@ -482,7 +471,7 @@ mod tests {
         );
     }
 
-    /// Oversize content fails before any lane, bytes, queue or sequence is spent.
+    /// Oversize content fails before any lane, bytes or queue capacity is spent.
     #[tokio::test]
     async fn oversize_body_does_not_consume_reservations() {
         let (mut ingress, _worker, _reports) = build(14);
@@ -492,10 +481,7 @@ mod tests {
             Err(OperationError::OutboundFrameTooLarge { .. })
         ));
         let permit = ingress.try_reserve_message(None).unwrap();
-        assert_eq!(
-            ingress.admit_reserved_data(permit, data(1)),
-            Ok(WireSequence::new(0))
-        );
+        assert_eq!(ingress.admit_reserved_data(permit, data(1)), Ok(()));
     }
 
     /// Cross-instance permits fail without stealing either owner's capacity.
@@ -518,15 +504,9 @@ mod tests {
         let (mut ingress, worker, mut reports) = build(28);
         let first = ingress.try_reserve_message(None).unwrap();
         let second = ingress.try_reserve_message(None).unwrap();
-        assert_eq!(
-            ingress.admit_reserved_data(first, data(1)),
-            Ok(WireSequence::new(0))
-        );
-        assert_eq!(ingress.try_admit(control(2)), Ok(WireSequence::new(1)));
-        assert_eq!(
-            ingress.admit_reserved_data(second, data(3)),
-            Ok(WireSequence::new(2))
-        );
+        assert_eq!(ingress.admit_reserved_data(first, data(1)), Ok(()));
+        assert_eq!(ingress.try_admit(control(2)), Ok(()));
+        assert_eq!(ingress.admit_reserved_data(second, data(3)), Ok(()));
         let (writer, mut peer) = tokio::io::duplex(128);
         let (_cancel, cancellation) = watch::channel(false);
         drop(ingress);
@@ -543,7 +523,6 @@ mod tests {
         for index in 0..3 {
             let report = reports.recv().await.unwrap();
             assert_eq!(report.write_id, WriteId::new(index + 1));
-            assert_eq!(report.sequence, WireSequence::new(index));
             assert_eq!(report.outcome, WriteOutcome::Committed);
             assert!(report.occurred_at.elapsed() < Duration::from_secs(3));
         }

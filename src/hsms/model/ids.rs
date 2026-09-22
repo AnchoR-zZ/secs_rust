@@ -119,13 +119,6 @@ internal_id!(
     "Identifies one Core-produced generation-local frame.",
     cfg(test)
 );
-#[cfg(any(feature = "runtime-tokio", test))]
-internal_id!(
-    WireSequence,
-    "Identifies one frame position in generation-local wire order. \
-     The generation Writer assigns it only after accepting a frame and \
-     never reuses it within the connection generation."
-);
 #[cfg(feature = "runtime-tokio")]
 internal_id!(
     LifecycleSequence,
@@ -158,7 +151,7 @@ impl SystemBytes {
 mod tests {
     use std::{any::TypeId, collections::HashSet};
 
-    use super::{CommandId, WireSequence, WriteId};
+    use super::{CommandId, WriteId};
 
     /// Confirms internal identifiers retain their values and total ordering.
     #[test]
@@ -177,17 +170,14 @@ mod tests {
         assert!(identities.insert(higher));
     }
 
-    /// Confirms command, Core-write, and Writer-order identifiers remain
+    /// Confirms command and Core-write identifiers remain
     /// distinct type-level facts even when their numeric values coincide.
     #[test]
     fn correlation_identifiers_are_distinct_types() {
         assert_ne!(TypeId::of::<CommandId>(), TypeId::of::<WriteId>());
-        assert_ne!(TypeId::of::<WriteId>(), TypeId::of::<WireSequence>());
-        assert_ne!(TypeId::of::<CommandId>(), TypeId::of::<WireSequence>());
 
         assert_eq!(CommandId::new(23).get(), 23);
         assert_eq!(WriteId::new(23).get(), 23);
-        assert_eq!(WireSequence::new(23).get(), 23);
     }
 
     /// Confirms the frozen correlation identifiers are inexpensive copyable

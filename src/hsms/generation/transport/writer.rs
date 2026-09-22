@@ -2,14 +2,11 @@
 //!
 //! The generation Driver reserves Data capacity before entering the Core, then
 //! transfers at most one Core-assigned Data frame with that permit. Control
-//! frames use their independent lane directly. Both lanes receive positions
-//! from the Writer's single generation-local wire order; actual I/O and later
-//! asynchronous write outcomes remain outside this seam.
+//! frames use their independent lane directly. Both lanes share one FIFO
+//! admission order; actual I/O and later asynchronous write outcomes remain
+//! outside this seam.
 
-use crate::hsms::{
-    model::ids::{WireSequence, WriteId},
-    protocol::message::ProtocolMessage,
-};
+use crate::hsms::{model::ids::WriteId, protocol::message::ProtocolMessage};
 
 /// One complete semantic frame offered to the generation Writer.
 #[derive(Debug, PartialEq)]
@@ -116,9 +113,8 @@ pub(crate) trait WriterIngress {
 
     /// Transfers one Data `frame` using a previously reserved Data `permit`.
     ///
-    /// On success, the returned [`WireSequence`] is allocated from the same
-    /// total order as Control admission, the Writer owns the frame, and the
-    /// permit is consumed. A close after reservation returns
+    /// On success, the Writer owns the frame in the shared FIFO order and
+    /// the permit is consumed. A close after reservation returns
     /// [`ReservedDataAdmissionError::Closed`]. An invalid permit, a non-Data
     /// frame, or any impossible post-reservation state returns
     /// [`ReservedDataAdmissionError::Invariant`]. Every return retires a valid
@@ -127,17 +123,16 @@ pub(crate) trait WriterIngress {
         &mut self,
         permit: Self::DataPermit,
         frame: OutboundFrame,
-    ) -> Result<WireSequence, ReservedDataAdmissionError>;
+    ) -> Result<(), ReservedDataAdmissionError>;
 
     /// Attempts to transfer one Control `frame` and assign total wire order.
     ///
-    /// On success, the returned [`WireSequence`] is allocated before this call
-    /// returns and cannot be overtaken by a frame admitted later. The Writer
-    /// owns the frame and must eventually report exactly one write outcome.
-    /// On error, ownership is rejected: no sequence or later outcome may be
-    /// allocated. Passing a Data frame is a contract violation reported as
+    /// On success, the frame cannot be overtaken by a frame admitted later.
+    /// The Writer owns the frame and must eventually report exactly one write outcome.
+    /// On error, ownership is rejected and no later outcome may be reported.
+    /// Passing a Data frame is a contract violation reported as
     /// [`WriteAdmissionError::Invariant`]; Data must use a reserved permit.
-    fn try_admit(&mut self, frame: OutboundFrame) -> Result<WireSequence, WriteAdmissionError>;
+    fn try_admit(&mut self, frame: OutboundFrame) -> Result<(), WriteAdmissionError>;
 }
 
 #[cfg(test)]
@@ -145,7 +140,7 @@ mod tests {
     use std::{collections::HashSet, rc::Rc};
 
     use crate::hsms::{
-        model::ids::{Function, SessionId, Stream, SystemBytes, WireSequence, WriteId},
+        model::ids::{Function, SessionId, Stream, SystemBytes, WriteId},
         protocol::{
             header::{ControlMessage, DataHeader},
             message::{DataMessage, ProtocolMessage},
@@ -160,8 +155,6 @@ mod tests {
     /// One frame retained by the fake after successful synchronous admission.
     #[derive(Debug, PartialEq)]
     struct AdmittedFrame {
-        /// Total generation-local position assigned by the fake Writer.
-        sequence: WireSequence,
         /// Owned frame retained until a test injects its terminal outcome.
         frame: OutboundFrame,
     }
@@ -198,8 +191,6 @@ mod tests {
     struct FakeWriterIngress {
         /// Unforgeable identity used to reject permits from every other instance.
         owner: Rc<()>,
-        /// Next numeric wire sequence, or `None` after sequence exhaustion.
-        next_sequence: Option<u64>,
         /// Next numeric reservation identity to allocate.
         next_reservation_id: u64,
         /// Remaining slots in the independently reserved Control lane.
@@ -222,14 +213,9 @@ mod tests {
 
     impl FakeWriterIngress {
         /// Creates an open fake with independent lane capacities and wire order.
-        fn with_capacities(
-            start_sequence: u64,
-            control_capacity: usize,
-            data_capacity: usize,
-        ) -> Self {
+        fn with_capacities(control_capacity: usize, data_capacity: usize) -> Self {
             Self {
                 owner: Rc::new(()),
-                next_sequence: Some(start_sequence),
                 next_reservation_id: 0,
                 available_control: control_capacity,
                 available_data: data_capacity,
@@ -245,13 +231,6 @@ mod tests {
         /// Closes the fake while retaining any already-issued Data permits.
         fn close(&mut self) {
             self.closed = true;
-        }
-
-        /// Allocates the next sequence without wrapping at the numeric boundary.
-        fn allocate_sequence(&mut self) -> Option<WireSequence> {
-            let raw = self.next_sequence?;
-            self.next_sequence = raw.checked_add(1);
-            Some(WireSequence::new(raw))
         }
 
         /// Removes a live permit after validating its Writer and reservation.
@@ -328,7 +307,7 @@ mod tests {
             &mut self,
             permit: Self::DataPermit,
             frame: OutboundFrame,
-        ) -> Result<WireSequence, ReservedDataAdmissionError> {
+        ) -> Result<(), ReservedDataAdmissionError> {
             self.take_data_reservation(&permit)
                 .map_err(|_| ReservedDataAdmissionError::Invariant)?;
 
@@ -343,18 +322,13 @@ mod tests {
                 return Err(ReservedDataAdmissionError::Closed);
             }
 
-            let Some(sequence) = self.allocate_sequence() else {
-                self.restore_data_capacity()
-                    .map_err(|_| ReservedDataAdmissionError::Invariant)?;
-                return Err(ReservedDataAdmissionError::Invariant);
-            };
             self.data_admissions += 1;
-            self.admitted.push(AdmittedFrame { sequence, frame });
-            Ok(sequence)
+            self.admitted.push(AdmittedFrame { frame });
+            Ok(())
         }
 
         /// Admits only Control frames through the independent Control lane.
-        fn try_admit(&mut self, frame: OutboundFrame) -> Result<WireSequence, WriteAdmissionError> {
+        fn try_admit(&mut self, frame: OutboundFrame) -> Result<(), WriteAdmissionError> {
             if !matches!(frame.message(), ProtocolMessage::Control(_)) {
                 return Err(WriteAdmissionError::Invariant);
             }
@@ -365,13 +339,10 @@ mod tests {
                 return Err(WriteAdmissionError::Full);
             }
 
-            let sequence = self
-                .allocate_sequence()
-                .ok_or(WriteAdmissionError::Invariant)?;
             self.available_control -= 1;
             self.control_admissions += 1;
-            self.admitted.push(AdmittedFrame { sequence, frame });
-            Ok(sequence)
+            self.admitted.push(AdmittedFrame { frame });
+            Ok(())
         }
     }
 
@@ -404,7 +375,7 @@ mod tests {
     /// Confirms reserve reports Data-lane saturation and ingress closure.
     #[test]
     fn reserve_data_reports_full_and_closed_without_touching_control() {
-        let mut writer = FakeWriterIngress::with_capacities(10, 1, 1);
+        let mut writer = FakeWriterIngress::with_capacities(1, 1);
 
         let permit = writer
             .try_reserve_data()
@@ -429,7 +400,7 @@ mod tests {
     /// Confirms a successful Data admission consumes its permit only once.
     #[test]
     fn reserved_data_admission_consumes_permit_exactly_once() {
-        let mut writer = FakeWriterIngress::with_capacities(20, 1, 1);
+        let mut writer = FakeWriterIngress::with_capacities(1, 1);
         let permit = writer
             .try_reserve_data()
             .expect("Data slot should be reservable");
@@ -437,7 +408,7 @@ mod tests {
 
         assert_eq!(
             writer.admit_reserved_data(permit, data_frame(1, 11)),
-            Ok(WireSequence::new(20))
+            Ok(())
         );
         assert_eq!(
             writer.admit_reserved_data(duplicate, data_frame(2, 12)),
@@ -451,7 +422,7 @@ mod tests {
     /// Confirms releasing a Data permit restores capacity exactly once.
     #[test]
     fn release_data_retires_permit_exactly_once() {
-        let mut writer = FakeWriterIngress::with_capacities(30, 1, 1);
+        let mut writer = FakeWriterIngress::with_capacities(1, 1);
         let permit = writer
             .try_reserve_data()
             .expect("Data slot should be reservable");
@@ -469,7 +440,7 @@ mod tests {
     /// Confirms permits from another Writer cannot mutate local reservations.
     #[test]
     fn unknown_data_permit_is_an_invariant() {
-        let mut writer = FakeWriterIngress::with_capacities(40, 1, 1);
+        let mut writer = FakeWriterIngress::with_capacities(1, 1);
         let permit = writer
             .try_reserve_data()
             .expect("Data slot should be reservable");
@@ -494,8 +465,8 @@ mod tests {
     /// Confirms identical Writer configuration cannot make permits interchangeable.
     #[test]
     fn same_configuration_writers_reject_cross_instance_permits() {
-        let mut first_writer = FakeWriterIngress::with_capacities(45, 1, 1);
-        let mut second_writer = FakeWriterIngress::with_capacities(45, 1, 1);
+        let mut first_writer = FakeWriterIngress::with_capacities(1, 1);
+        let mut second_writer = FakeWriterIngress::with_capacities(1, 1);
         let first_permit = first_writer
             .try_reserve_data()
             .expect("first Writer Data slot should be reservable");
@@ -529,7 +500,7 @@ mod tests {
     /// Confirms each admission path rejects the other protocol-message lane.
     #[test]
     fn control_and_reserved_data_paths_validate_their_lanes() {
-        let mut writer = FakeWriterIngress::with_capacities(50, 1, 1);
+        let mut writer = FakeWriterIngress::with_capacities(1, 1);
 
         assert_eq!(
             writer.try_admit(data_frame(1, 21)),
@@ -550,7 +521,7 @@ mod tests {
     /// Confirms a reservation survives later Data saturation without `Full`.
     #[test]
     fn reserved_data_slot_survives_post_reservation_full_state() {
-        let mut writer = FakeWriterIngress::with_capacities(60, 1, 1);
+        let mut writer = FakeWriterIngress::with_capacities(1, 1);
         let permit = writer
             .try_reserve_data()
             .expect("Data slot should be reservable");
@@ -561,35 +532,15 @@ mod tests {
         ));
         assert_eq!(
             writer.admit_reserved_data(permit, data_frame(3, 23)),
-            Ok(WireSequence::new(60))
+            Ok(())
         );
         assert_eq!(writer.data_admissions, 1);
-    }
-
-    /// Confirms impossible post-permit sequence exhaustion is an invariant.
-    #[test]
-    fn sequence_exhaustion_after_data_reservation_is_an_invariant() {
-        let mut writer = FakeWriterIngress::with_capacities(u64::MAX, 1, 1);
-        let permit = writer
-            .try_reserve_data()
-            .expect("Data slot should be reservable");
-
-        assert_eq!(
-            writer.try_admit(control_frame(31, 231)),
-            Ok(WireSequence::new(u64::MAX))
-        );
-        assert_eq!(
-            writer.admit_reserved_data(permit, data_frame(32, 232)),
-            Err(ReservedDataAdmissionError::Invariant)
-        );
-        assert_eq!(writer.available_data, 1);
-        assert_eq!(writer.data_admissions, 0);
     }
 
     /// Confirms closure after reservation retires the permit without admission.
     #[test]
     fn close_after_reservation_returns_closed_and_retires_permit() {
-        let mut writer = FakeWriterIngress::with_capacities(70, 1, 1);
+        let mut writer = FakeWriterIngress::with_capacities(1, 1);
         let permit = writer
             .try_reserve_data()
             .expect("Data slot should be reservable");
@@ -611,27 +562,24 @@ mod tests {
     /// Confirms Data reservation cannot consume the reserved Control slot.
     #[test]
     fn data_reservation_does_not_consume_control_capacity() {
-        let mut writer = FakeWriterIngress::with_capacities(80, 1, 1);
+        let mut writer = FakeWriterIngress::with_capacities(1, 1);
         let permit = writer
             .try_reserve_data()
             .expect("Data slot should be reservable");
 
-        assert_eq!(
-            writer.try_admit(control_frame(6, 26)),
-            Ok(WireSequence::new(80))
-        );
+        assert_eq!(writer.try_admit(control_frame(6, 26)), Ok(()));
         assert_eq!(
             writer.admit_reserved_data(permit, data_frame(7, 27)),
-            Ok(WireSequence::new(81))
+            Ok(())
         );
         assert_eq!(writer.control_admissions, 1);
         assert_eq!(writer.data_admissions, 1);
     }
 
-    /// Confirms both lanes share one strictly increasing total wire sequence.
+    /// Confirms both lanes retain their shared FIFO admission order.
     #[test]
     fn control_and_data_admissions_share_one_total_wire_order() {
-        let mut writer = FakeWriterIngress::with_capacities(91, 2, 2);
+        let mut writer = FakeWriterIngress::with_capacities(2, 2);
         let first_data_permit = writer
             .try_reserve_data()
             .expect("first Data slot should be reservable");
@@ -639,35 +587,31 @@ mod tests {
             .try_reserve_data()
             .expect("second Data slot should be reservable");
 
-        let first = writer
+        writer
             .admit_reserved_data(first_data_permit, data_frame(8, 28))
             .expect("reserved Data frame should be admitted");
-        let second = writer
+        writer
             .try_admit(control_frame(9, 29))
             .expect("Control frame should be admitted");
-        let third = writer
+        writer
             .admit_reserved_data(second_data_permit, data_frame(10, 30))
             .expect("reserved Data frame should be admitted");
-        let fourth = writer
+        writer
             .try_admit(control_frame(11, 31))
             .expect("Control frame should be admitted");
 
         assert_eq!(
-            [first, second, third, fourth],
-            [
-                WireSequence::new(91),
-                WireSequence::new(92),
-                WireSequence::new(93),
-                WireSequence::new(94),
-            ]
-        );
-        assert_eq!(
             writer
                 .admitted
                 .iter()
-                .map(|admitted| admitted.sequence)
+                .map(|admitted| admitted.frame.write_id())
                 .collect::<Vec<_>>(),
-            vec![first, second, third, fourth]
+            vec![
+                WriteId::new(8),
+                WriteId::new(9),
+                WriteId::new(10),
+                WriteId::new(11)
+            ]
         );
 
         for write_id in [8, 9, 10, 11] {
@@ -679,21 +623,21 @@ mod tests {
     /// Confirms Control Full and Closed preserve the B1 admission behavior.
     #[test]
     fn control_admission_preserves_full_and_closed_behavior() {
-        let mut full_writer = FakeWriterIngress::with_capacities(100, 0, 1);
+        let mut full_writer = FakeWriterIngress::with_capacities(0, 1);
         assert_eq!(
             full_writer.try_admit(control_frame(12, 32)),
             Err(WriteAdmissionError::Full)
         );
-        assert_eq!(full_writer.next_sequence, Some(100));
+
         assert!(full_writer.admitted.is_empty());
 
-        let mut closed_writer = FakeWriterIngress::with_capacities(110, 1, 1);
+        let mut closed_writer = FakeWriterIngress::with_capacities(1, 1);
         closed_writer.close();
         assert_eq!(
             closed_writer.try_admit(control_frame(13, 33)),
             Err(WriteAdmissionError::Closed)
         );
-        assert_eq!(closed_writer.next_sequence, Some(110));
+
         assert!(closed_writer.admitted.is_empty());
     }
 

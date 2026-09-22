@@ -316,7 +316,7 @@ fn send_and_request_translate_headers_and_preserve_bodies() {
     }));
     let receipt = send_result(&send).expect("committed Send must return a receipt");
     assert_eq!(receipt.generation().get(), 17);
-    assert_eq!(receipt.wire_sequence(), 1);
+
     assert!(send.try_recv().is_err());
     assert!(request.try_recv().is_err());
     assert!(harness.drive_one(HarnessInput::WriteOutcome {
@@ -477,7 +477,7 @@ fn reserved_data_admission_failures_close_with_stable_reason() {
 }
 
 /// Confirms Data reservation never consumes Control capacity and both lanes
-/// allocate from one monotonically ordered WireSequence space.
+/// retain frames in their shared FIFO admission order.
 #[test]
 fn control_and_data_lanes_are_isolated_but_share_wire_order() {
     let mut harness = DriverHarness::with_limits(256, 512, 1, 1);
@@ -493,9 +493,9 @@ fn control_and_data_lanes_are_isolated_but_share_wire_order() {
     );
 
     let admitted = harness.driver.writer().admitted();
-    assert_eq!(admitted[1].sequence.get(), 1);
+
     assert!(matches!(admitted[1].message, ProtocolMessage::Data(_)));
-    assert_eq!(admitted[2].sequence.get(), 2);
+
     assert!(matches!(admitted[2].message, ProtocolMessage::Control(_)));
     assert!(send.try_recv().is_err());
 }
@@ -677,7 +677,7 @@ fn overdue_commit_callback_times_out_without_an_extra_clock_turn() {
         })
     );
     assert!(receiver.try_recv().is_err());
-    assert!(harness.driver.wire_sequence(write_id).is_none());
+    assert!(!harness.driver.has_admitted_write(write_id));
     assert_eq!(harness.driver.close_reason(), None);
 }
 
@@ -1037,7 +1037,7 @@ fn shutdown_waits_for_actual_write_visibility_before_typed_settlement() {
             assert!(receiver.try_recv().is_err());
             assert_eq!(harness.driver.pending_completion_count(), 1);
             assert_eq!(harness.driver.closer().count(), 1);
-            assert!(harness.driver.wire_sequence(write_id).is_some());
+            assert!(harness.driver.has_admitted_write(write_id));
             assert!(harness.drive_one(HarnessInput::WriteOutcome { write_id, outcome }));
             let expected_error = match outcome {
                 WriteOutcome::Indeterminate(_) => OperationError::DeliveryIndeterminate,
@@ -1177,14 +1177,6 @@ fn dropped_send_receiver_does_not_disrupt_completion() {
                 label: "dropped",
                 result: Ok(SendReceipt::new(
                     crate::hsms::model::ids::ConnectionGeneration::new(17),
-                    harness
-                        .driver
-                        .writer()
-                        .admitted()
-                        .iter()
-                        .find(|frame| frame.write_id == write_id)
-                        .expect("Send frame remains available for trace assertion")
-                        .sequence,
                 )),
             },
         ]

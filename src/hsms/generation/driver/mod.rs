@@ -6,7 +6,7 @@
 //! It deliberately contains no socket, task, channel, or asynchronous runtime.
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     sync::Arc,
 };
 
@@ -23,7 +23,7 @@ use crate::hsms::{
     },
     lifecycle::SessionState,
     model::{
-        ids::{CommandId, ConnectionGeneration, WireSequence, WriteId},
+        ids::{CommandId, ConnectionGeneration, WriteId},
         runtime::{CloseBarrier, GenerationCloseReason, MonoTime, WriteOutcome},
     },
     protocol::message::ProtocolMessage,
@@ -327,14 +327,14 @@ enum ActionApplicationFailure {
     InboundFull,
     /// Writer rejected ownership of one Core-produced Control frame.
     ControlWriteAdmission {
-        /// Write identity rejected before a wire sequence was allocated.
+        /// Write identity rejected before the Writer accepted ownership.
         write_id: WriteId,
         /// Stable synchronous Writer rejection category.
         error: WriteAdmissionError,
     },
     /// Writer rejected a Data frame after a successful reservation.
     ReservedDataAdmission {
-        /// Write identity rejected before a wire sequence was allocated.
+        /// Write identity rejected before the Writer accepted ownership.
         write_id: WriteId,
         /// Stable post-reservation rejection category.
         error: ReservedDataAdmissionError,
@@ -388,8 +388,8 @@ pub(crate) struct SessionDriver<Writer, Observer, Completion, Closer> {
     maximum_message_length: usize,
     /// Typed unique completion endpoints for commands already presented to Core.
     completions: BTreeMap<CommandId, PendingCompletion<Completion>>,
-    /// Writer sequence retained for each successfully admitted WriteId.
-    admitted_writes: HashMap<WriteId, WireSequence>,
+    /// Successfully admitted writes awaiting terminal outcome processing.
+    admitted_writes: HashSet<WriteId>,
     /// Next generation-local command number, or `None` after exhaustion.
     next_command_id: Option<u64>,
     /// First-reason-wins close state, including an optional write barrier.
@@ -479,7 +479,7 @@ where
             shutdown_draining: false,
             maximum_message_length: crate::hsms::EndpointLimits::default().max_message_length(),
             completions: BTreeMap::new(),
-            admitted_writes: HashMap::new(),
+            admitted_writes: HashSet::new(),
             next_command_id: Some(0),
             closing: None,
             transport_closed: false,
@@ -976,7 +976,7 @@ where
     /// Presents a terminal shutdown reason to Core and enters fail-closed.
     ///
     /// `failed_write_id` is `Some` only for a synchronous Writer admission
-    /// failure that did not allocate a sequence or later outcome.
+    /// failure for which the Writer will not report a later outcome.
     pub(crate) fn on_shutdown(
         &mut self,
         reason: GenerationCloseReason,
@@ -1062,9 +1062,9 @@ where
         self.transport_closed
     }
 
-    /// Returns the Writer sequence saved for one still-tracked admitted write.
-    pub(crate) fn wire_sequence(&self, write_id: WriteId) -> Option<WireSequence> {
-        self.admitted_writes.get(&write_id).copied()
+    /// Returns whether the Writer accepted this still-pending write identity.
+    pub(crate) fn has_admitted_write(&self, write_id: WriteId) -> bool {
+        self.admitted_writes.contains(&write_id)
     }
 
     /// Borrows the Writer for generation orchestration and deterministic tests.
@@ -1158,7 +1158,7 @@ where
                 }
                 CoreAction::SendFrame { write_id, message } => {
                     let frame = OutboundFrame::new(write_id, message);
-                    let sequence = match frame.message() {
+                    let admission = match frame.message() {
                         ProtocolMessage::Control(_) => {
                             self.writer.try_admit(frame).map_err(|error| {
                                 ActionApplicationFailure::ControlWriteAdmission { write_id, error }
@@ -1180,14 +1180,14 @@ where
                                 })
                         }
                     };
-                    let sequence = match sequence {
-                        Ok(sequence) => sequence,
+                    match admission {
+                        Ok(()) => (),
                         Err(failure) => {
                             application_result = Err(failure);
                             break;
                         }
                     };
-                    if self.admitted_writes.insert(write_id, sequence).is_some() {
+                    if !self.admitted_writes.insert(write_id) {
                         Err(ActionApplicationFailure::DuplicateOrUnknownCompletion)
                     } else {
                         Ok(())
@@ -1244,10 +1244,11 @@ where
                 Some(DriverCommandResult::Control(result))
             }
             (CompletionKind::Send, CoreCommandResult::Send(Ok(committed))) => {
-                let sequence = self.admitted_writes.get(&committed.write_id()).copied()?;
+                if !self.has_admitted_write(committed.write_id()) {
+                    return None;
+                }
                 Some(DriverCommandResult::Send(Ok(SendReceipt::new(
                     self.generation,
-                    sequence,
                 ))))
             }
             (CompletionKind::Send, CoreCommandResult::Send(Err(error))) => {
